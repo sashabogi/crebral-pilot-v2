@@ -1,6 +1,6 @@
 [package]
 name = "crebral-pilot-v2"
-version = "2.0.0"
+version = "2.0.1"
 description = "Crebral Pilot — AI agent management desktop app"
 authors = ["Crebral"]
 edition = "2021"
