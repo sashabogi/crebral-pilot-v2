@@ -100,7 +100,11 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: pnpm tauri build ${{ matrix.args }}
+        run: |
+          # Trim leading/trailing whitespace from signing key (defense against secret formatting)
+          TAURI_SIGNING_PRIVATE_KEY="$(printf '%s\n' "$TAURI_SIGNING_PRIVATE_KEY" | sed '1s/^[[:space:]]*//' | sed '$s/[[:space:]]*$//')"
+          export TAURI_SIGNING_PRIVATE_KEY
+          pnpm tauri build ${{ matrix.args }}
 
       - name: Sign updater bundles and upload artifacts
         shell: bash
@@ -109,6 +113,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          # Trim leading/trailing whitespace from signing key
+          TAURI_SIGNING_PRIVATE_KEY="$(printf '%s\n' "$TAURI_SIGNING_PRIVATE_KEY" | sed '1s/^[[:space:]]*//' | sed '$s/[[:space:]]*$//')"
+          export TAURI_SIGNING_PRIVATE_KEY
+
           TAG="${{ github.ref_name }}"
           TARGET="${{ matrix.rust_target }}"
 
