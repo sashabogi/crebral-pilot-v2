@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { isElectron, safeIpc, api } from '../lib/ipc'
+import { isTauri, safeIpc, api } from '../lib/ipc'
 import { useHeartbeatStore } from './heartbeat-store'
 
 // ---------------------------------------------------------------------------
@@ -76,7 +76,7 @@ export const useAppStore = create<AppState>()(
       },
 
       switchAccount: async (userId) => {
-        if (!isElectron()) return false
+        if (!isTauri()) return false
         set({ isLoading: true })
         try {
           const result = await safeIpc(
@@ -96,7 +96,7 @@ export const useAppStore = create<AppState>()(
       },
 
       removeAccount: async (userId) => {
-        if (!isElectron()) return false
+        if (!isTauri()) return false
         set({ isLoading: true })
         try {
           const result = await safeIpc(
@@ -140,7 +140,7 @@ export const useAppStore = create<AppState>()(
       },
 
       addAgent: async (config) => {
-        if (!isElectron()) return false
+        if (!isTauri()) return false
         set({ isLoading: true })
         try {
           const result = await safeIpc(
@@ -157,7 +157,7 @@ export const useAppStore = create<AppState>()(
       },
 
       removeAgent: async (id) => {
-        if (!isElectron()) return false
+        if (!isTauri()) return false
         set({ isLoading: true })
         try {
           const result = await safeIpc(
@@ -194,7 +194,7 @@ export const useAppStore = create<AppState>()(
       },
 
       saveSettings: async (settings) => {
-        if (!isElectron()) return false
+        if (!isTauri()) return false
         const result = await safeIpc(
           () => api.settings.set(settings as Record<string, unknown>) as Promise<{ ok: boolean }>,
           { ok: false }
@@ -206,7 +206,7 @@ export const useAppStore = create<AppState>()(
       },
 
       validateConnection: async () => {
-        if (!isElectron()) {
+        if (!isTauri()) {
           set({ connectionStatus: 'disconnected' })
           return
         }

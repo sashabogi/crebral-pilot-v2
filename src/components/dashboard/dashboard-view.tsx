@@ -211,6 +211,7 @@ export function DashboardView() {
 
   const [hbStatus, setHbStatus] = useState<HeartbeatStatus | null>(null);
   const [isToggling, setIsToggling] = useState(false);
+  const [toggleError, setToggleError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState('--:--');
   const [coordStatus, setCoordStatus] = useState<CoordinatorStatus | null>(null);
   const [orchCountdown, setOrchCountdown] = useState('--:--');
@@ -334,18 +335,26 @@ export function DashboardView() {
   const handleToggle = async () => {
     if (!activeAgent) return;
     setIsToggling(true);
+    setToggleError(null);
     try {
       if (hbStatus?.running) {
-        await api.heartbeat.stop(activeAgent.agentId);
+        const result = await api.heartbeat.stop(activeAgent.agentId);
+        if (result && result.ok === false) {
+          setToggleError(result.error?.message || 'Failed to stop synaptogenesis');
+        }
       } else {
-        await api.heartbeat.start(activeAgent.agentId, {
+        const result = await api.heartbeat.start(activeAgent.agentId, {
           provider: activeAgent.provider,
           model: activeAgent.model,
         });
+        if (result && result.ok === false) {
+          setToggleError(result.error?.message || 'Failed to start — check API key configuration in Brain settings');
+        }
       }
       await fetchStatus();
     } catch (err) {
       console.warn('Synaptogenesis toggle failed:', err);
+      setToggleError(err instanceof Error ? err.message : typeof err === 'string' ? err : 'Failed to toggle synaptogenesis');
     } finally {
       setIsToggling(false);
     }
@@ -424,9 +433,9 @@ export function DashboardView() {
   /* ================================================================ */
 
   const avatarColor = activeAgent.color || getProviderColor(activeAgent.provider);
-  const providerColor = getProviderColor(dashData?.profile?.llmProvider || activeAgent.provider);
-  const providerLabel = dashData?.profile?.llmProvider || activeAgent.provider || 'Unknown';
-  const modelLabel = dashData?.profile?.llmModel || activeAgent.model || '';
+  const providerColor = getProviderColor(activeAgent.provider || dashData?.profile?.llmProvider);
+  const providerLabel = activeAgent.provider || dashData?.profile?.llmProvider || 'Unknown';
+  const modelLabel = activeAgent.model || dashData?.profile?.llmModel || '';
   const displayName = dashData?.profile?.displayName || activeAgent.displayName || activeAgent.agentId;
   const username = dashData?.profile?.username || activeAgent.agentId;
   const bio = dashData?.profile?.bio;
@@ -510,6 +519,26 @@ export function DashboardView() {
             </button>
           </div>
         </div>
+
+        {toggleError && (
+          <div style={{
+            marginTop: '-12px',
+            padding: '10px 14px',
+            borderRadius: 'var(--crebral-radius-md)',
+            background: 'rgba(239, 68, 68, 0.08)',
+            border: '1px solid rgba(239, 68, 68, 0.2)',
+          }}>
+            <p style={{
+              fontFamily: 'var(--crebral-font-body)',
+              fontSize: '0.75rem',
+              color: '#ef4444',
+              margin: 0,
+              lineHeight: 1.5,
+            }}>
+              {toggleError}
+            </p>
+          </div>
+        )}
 
         {/* -- Identity Card ---------------------------------------------- */}
         <div

@@ -12,13 +12,14 @@ interface TitleBarProps {
 export function TitleBar({ viewName, agentCount }: TitleBarProps) {
   return (
     <div
+      data-tauri-drag-region
       className="titlebar-drag flex items-center justify-between shrink-0"
       style={{
         height: '44px',
         minHeight: '44px',
         paddingLeft: '80px',
         paddingRight: '16px',
-        background: 'transparent',
+        background: 'var(--crebral-bg-deep)',
       }}
     >
       {/* Optional view name */}

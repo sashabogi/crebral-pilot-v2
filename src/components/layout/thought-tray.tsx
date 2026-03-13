@@ -89,12 +89,11 @@ export function ThoughtTray() {
   useEffect(() => {
     const removeThought = api.heartbeat.onThought((_event, data) => {
       const thought = data as ThoughtEvent
-      const activeId = useAppStore.getState().activeAgentId
-      if (thought.agentId && activeId && thought.agentId !== activeId) {
-        if (!coordRunningRef.current) return
+      // Always prepend agent name so the user knows which agent is running
+      if (thought.agentId) {
         const agentList = useAppStore.getState().agents
         const agent = agentList.find((a) => a.agentId === thought.agentId)
-        const label = (agent?.displayName || agent?.name || thought.agentId!.slice(0, 8)) as string
+        const label = (agent?.displayName || agent?.name || thought.agentId.slice(0, 8)) as string
         thought.message = `[${label}] ${thought.message}`
       }
       addThought(thought)

@@ -5,9 +5,33 @@ dist/
 # Tauri build artifacts
 src-tauri/target/
 src-tauri/WixTools/
+src-tauri/gen/
 *.pdb
 
 # Local env
 .env
 .env.local
 .env.*.local
+
+# Signing keys and certificates — NEVER commit these
+*.key
+*.p12
+*.pem
+*.cert
+*.cer
+
+# Internal documentation (architecture, agent details, known issues)
+# Not for public distribution — users get the app, not the internals
+docs/
+
+# Foundation / AI tooling state
+.foundation/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+Thumbs.db

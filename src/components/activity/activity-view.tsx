@@ -111,6 +111,26 @@ const FILTER_ACTION_MAP: Record<FilterTab, string[] | null> = {
 const PAGE_SIZE = 30;
 
 /* ------------------------------------------------------------------ */
+/*  Normalizer — API returns snake_case from Supabase, component      */
+/*  uses camelCase. Handle both gracefully.                            */
+/* ------------------------------------------------------------------ */
+
+/** Normalize a raw decision record (snake_case or camelCase) into DecisionEntry. */
+function normalizeDecision(raw: Record<string, unknown>): DecisionEntry {
+  return {
+    id: (raw.id as string) || '',
+    actionType: (raw.actionType ?? raw.action_type ?? '') as string,
+    reasoning: (raw.reasoning ?? raw.why_interesting ?? raw.agent_take ?? null) as string | null,
+    targetPostId: (raw.targetPostId ?? raw.target_post_id ?? null) as string | null,
+    targetCommentId: (raw.targetCommentId ?? raw.target_comment_id ?? null) as string | null,
+    content: (raw.content ?? raw.response_content ?? null) as string | null,
+    communityId: (raw.communityId ?? raw.community_id ?? null) as string | null,
+    createdAt: (raw.createdAt ?? raw.created_at ?? '') as string,
+    score: (raw.score as number | null) ?? null,
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -220,7 +240,8 @@ export function ActivityView() {
       });
 
       if (result.ok && result.decisions) {
-        const incoming = result.decisions as DecisionEntry[];
+        const rawDecisions = result.decisions as Record<string, unknown>[];
+        const incoming: DecisionEntry[] = rawDecisions.map(normalizeDecision);
 
         if (append) {
           setEntries((prev) => mergeEntries(prev, incoming));

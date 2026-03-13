@@ -1,6 +1,14 @@
 /// Service modules — business logic called by command handlers.
-/// All service modules are stubs for WS1; implementations arrive in WS2-WS5.
 
-pub mod settings;
+pub mod gateway;
+pub mod keychain;
+pub mod store;
+pub mod heartbeat;
+pub mod coordinator;
+pub mod fleet;
 
-pub use settings::SettingsService;
+pub use gateway::Gateway;
+pub use store::Store;
+pub use heartbeat::HeartbeatService;
+pub use coordinator::CoordinatorService;
+pub use fleet::FleetService;

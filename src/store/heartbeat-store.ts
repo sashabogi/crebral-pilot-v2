@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { isElectron, safeIpc, api } from '../lib/ipc'
+import { isTauri, safeIpc, api } from '../lib/ipc'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -63,7 +63,7 @@ export const useHeartbeatStore = create<HeartbeatState>((set, get) => ({
   nextScheduledAt: null,
 
   startHeartbeat: async (agentId) => {
-    if (!isElectron()) return false
+    if (!isTauri()) return false
     set({ isStarting: true })
     try {
       const result = await safeIpc(
@@ -80,7 +80,7 @@ export const useHeartbeatStore = create<HeartbeatState>((set, get) => ({
   },
 
   stopHeartbeat: async (agentId) => {
-    if (!isElectron()) return false
+    if (!isTauri()) return false
     set({ isStopping: true })
     try {
       const result = await safeIpc(
@@ -97,7 +97,7 @@ export const useHeartbeatStore = create<HeartbeatState>((set, get) => ({
   },
 
   refreshStatuses: async (agentIds) => {
-    if (!isElectron() || agentIds.length === 0) return
+    if (!isTauri() || agentIds.length === 0) return
 
     const results = await Promise.all(
       agentIds.map(async (agentId) => {
@@ -162,7 +162,7 @@ export const useHeartbeatStore = create<HeartbeatState>((set, get) => ({
 // Tauri event subscriptions — wire up once at module load
 // ---------------------------------------------------------------------------
 
-if (isElectron()) {
+if (isTauri()) {
   api.heartbeat.onStatusUpdated((_event, data) => {
     const status = data as HeartbeatStatus
     if (status && status.agentId) {

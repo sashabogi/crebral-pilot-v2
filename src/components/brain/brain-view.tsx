@@ -160,7 +160,32 @@ export function BrainView() {
     async function fetchInitialModels() {
       setLoadingModels(true);
       try {
-        if (api.models?.fetchWithKey) {
+        // If the key is "REDACTED", the backend has a real key stored but
+        // never exposes it to the frontend. Use the server-side fetch command
+        // that resolves the real key from keychain/JSON.
+        if (storedAgent!.providerApiKey === 'REDACTED' && api.models?.fetchForAgent) {
+          const result = await api.models.fetchForAgent(
+            storedAgent!.agentId,
+            storedAgent!.provider,
+          );
+          if (result.ok && result.models && result.models.length > 0) {
+            setModels(result.models);
+            const found = result.models.find(
+              (m) => m.id === storedAgent!.model,
+            );
+            if (found) {
+              setSelectedModelId(found.id);
+            } else {
+              setSelectedModelId(
+                result.defaultModel || result.models[0].id,
+              );
+            }
+            return;
+          }
+        }
+
+        // Key is a real user-entered value (not REDACTED) — use it directly
+        if (storedAgent!.providerApiKey !== 'REDACTED' && api.models?.fetchWithKey) {
           const result = await api.models.fetchWithKey(
             storedAgent!.provider,
             storedAgent!.providerApiKey,
@@ -230,6 +255,18 @@ export function BrainView() {
       const result = await api.models.fetchWithKey(selectedProviderId, llmApiKey.trim());
       if (result.ok && result.models && result.models.length > 0) {
         setTestResult({ ok: true, message: `Connected — ${result.models.length} models available` });
+        // Populate model dropdown so user can save immediately after testing
+        setModels(result.models);
+        if (!selectedModelId || !result.models.find((m) => m.id === selectedModelId)) {
+          setSelectedModelId(result.defaultModel || result.models[0].id);
+        }
+        // Cancel any pending debounced fetch since we already have models
+        if (modelFetchTimerRef.current) {
+          clearTimeout(modelFetchTimerRef.current);
+          modelFetchTimerRef.current = null;
+        }
+        setFetchingModels(false);
+        setLoadingModels(false);
       } else if (result.ok) {
         setTestResult({ ok: true, message: 'Connected' });
       } else {
@@ -240,7 +277,7 @@ export function BrainView() {
     } finally {
       setIsTesting(false);
     }
-  }, [selectedProviderId, llmApiKey]);
+  }, [selectedProviderId, llmApiKey, selectedModelId]);
 
   /* -- Debounced model fetch when API key changes -------------------------- */
 
@@ -249,8 +286,10 @@ export function BrainView() {
   );
 
   useEffect(() => {
-    // Skip during initial load — handled by the initial fetch effect
-    if (!providerChanged && storedAgent && !initialModelFetchDone.current)
+    // Skip during initial load — handled by the initial fetch effect.
+    // UNLESS the stored agent has no provider key (initial fetch was skipped),
+    // in which case we allow the debounced fetch to run when the user enters a key.
+    if (!providerChanged && storedAgent && !initialModelFetchDone.current && storedAgent.providerApiKey)
       return;
 
     if (modelFetchTimerRef.current) {
@@ -360,7 +399,7 @@ export function BrainView() {
     try {
       const result = await api.agents.add({
         agentId: storedAgent.agentId,
-        apiKey: storedAgent.apiKey,
+        name: storedAgent.name,
         displayName: storedAgent.displayName,
         color: storedAgent.color,
         provider: providers.find(p => p.id === selectedProviderId)?.isDirect === false

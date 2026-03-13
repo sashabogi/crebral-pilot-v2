@@ -52,7 +52,12 @@ export function LoginView({ onComplete, onSkip }: LoginViewProps) {
 
       if (!result.ok) {
         setPhase('error')
-        setErrorMessage(result.error?.message || 'Account sync failed')
+        // Handle both structured errors and raw string errors
+        const errMsg = result.error?.message
+          || (typeof result.error === 'string' ? result.error : null)
+          || (result.data && typeof result.data === 'string' ? result.data : null)
+          || 'Account sync failed'
+        setErrorMessage(errMsg)
         return
       }
 
@@ -100,7 +105,7 @@ export function LoginView({ onComplete, onSkip }: LoginViewProps) {
         zIndex: 50,
       }}
     >
-      <div className="titlebar-drag" style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '44px' }} />
+      <div data-tauri-drag-region className="titlebar-drag" style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '44px' }} />
 
       <div
         style={{

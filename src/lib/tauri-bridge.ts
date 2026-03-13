@@ -34,7 +34,12 @@ async function safeInvoke(
   try {
     return await invoke(cmd, args)
   } catch (err) {
-    console.error(`[tauri-bridge] invoke(${cmd}) failed:`, err)
+    const msg = typeof err === 'string' ? err : err instanceof Error ? err.message : String(err)
+    console.error(`[tauri-bridge] invoke(${cmd}) failed:`, msg)
+    // Preserve the error message in the returned envelope so callers can display it
+    if (fallback && typeof fallback === 'object' && 'ok' in (fallback as Record<string, unknown>)) {
+      return { ok: false, error: { code: 'INVOKE_ERROR', message: msg } }
+    }
     return fallback
   }
 }
@@ -162,6 +167,9 @@ export const api = {
 
     fetchWithKey: (providerId: string, apiKey: string) =>
       safeInvoke('models_fetch_with_key', { providerId, apiKey }, { ok: false, models: [] }),
+
+    fetchForAgent: (agentId: string, providerId: string) =>
+      safeInvoke('models_fetch_for_agent', { agentId, providerId }, { ok: false, models: [] }),
   },
 
   // ── Coordinator ───────────────────────────────────────────────────────────

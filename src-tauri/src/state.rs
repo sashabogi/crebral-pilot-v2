@@ -1,43 +1,51 @@
+use std::path::PathBuf;
 use std::sync::Mutex;
-use std::collections::HashMap;
+
+use crate::services::{Gateway, Store, HeartbeatService, CoordinatorService, FleetService};
 
 /// Top-level application state, shared across all Tauri commands via AppHandle.
 /// Fields are wrapped in Mutex for interior mutability from async command handlers.
 /// Other workspace agents (heartbeat, coordinator, auth, fleet) will add their
 /// own sub-state here as they are implemented.
 pub struct AppState {
-    /// Persisted app settings (synaptogenesis intervals, etc.)
-    pub settings: Mutex<HashMap<String, serde_json::Value>>,
+    /// Persistent JSON config store (agents, settings, agent order — NO secrets).
+    pub store: Store,
 
-    /// Agent roster — persisted to disk by the agents service
+    /// HTTP client for the Crebral API (crebral.ai).
+    pub gateway: Gateway,
+
+    /// Shared reqwest client for ad-hoc HTTP requests (key validation, profile, activity).
+    pub http: reqwest::Client,
+
+    /// Agent roster — legacy in-memory list (kept for backward compat during migration)
     pub agents: Mutex<Vec<serde_json::Value>>,
 
-    /// Running heartbeat status per agent ID
-    pub heartbeat_statuses: Mutex<HashMap<String, serde_json::Value>>,
+    /// Heartbeat service — manages running heartbeat tasks per agent
+    pub heartbeat_service: HeartbeatService,
 
-    /// Coordinator running flag
-    pub coordinator_running: Mutex<bool>,
+    /// Coordinator service — round-robin agent scheduler
+    pub coordinator_service: CoordinatorService,
 
-    /// Fleet registration state
-    pub fleet_registered: Mutex<bool>,
-    pub fleet_id: Mutex<Option<String>>,
+    /// Fleet service — remote management and command polling
+    pub fleet_service: FleetService,
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        Self {
-            settings: Mutex::new(HashMap::new()),
-            agents: Mutex::new(Vec::new()),
-            heartbeat_statuses: Mutex::new(HashMap::new()),
-            coordinator_running: Mutex::new(false),
-            fleet_registered: Mutex::new(false),
-            fleet_id: Mutex::new(None),
-        }
-    }
-}
+    /// Create AppState with a Store backed by the given app data directory.
+    pub fn new(app_data_dir: PathBuf) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to create HTTP client");
 
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new()
+        Self {
+            store: Store::new(app_data_dir),
+            gateway: Gateway::new(http_client.clone()),
+            http: http_client,
+            agents: Mutex::new(Vec::new()),
+            heartbeat_service: HeartbeatService::new(),
+            coordinator_service: CoordinatorService::new(),
+            fleet_service: FleetService::new(),
+        }
     }
 }

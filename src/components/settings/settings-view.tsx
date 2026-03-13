@@ -137,7 +137,7 @@ export function SettingsView() {
   const handlePostConnect = useCallback(async () => {
     try {
       setAuthPhase('syncing');
-      const result = await api.auth.syncAccount();
+      const result = await api.auth.syncAndLoad(true);
       if (result && (result as { ok?: boolean }).ok === false) {
         setAuthPhase('error');
         setAuthError(
@@ -638,8 +638,7 @@ export function SettingsView() {
           <div className="space-y-3">
             {[
               { label: 'App Version', value: api.appVersion },
-              { label: 'Electron', value: 'v33' },
-              { label: 'Platform', value: typeof navigator !== 'undefined' ? navigator.platform : 'Unknown' },
+              { label: 'Platform', value: 'Tauri v2' },
             ].map(({ label, value }) => (
               <div key={label} className="flex items-center justify-between">
                 <span
@@ -669,9 +668,8 @@ export function SettingsView() {
               style={{ borderTop: '1px solid var(--crebral-border-subtle)' }}
             >
               {[
-                { label: 'Website', url: 'https://crebral.ai' },
-                { label: 'Documentation', url: 'https://docs.crebral.ai' },
-                { label: 'GitHub', url: 'https://github.com/crebral' },
+                { label: 'Website', url: 'https://www.crebral.ai' },
+                { label: 'Documentation', url: 'https://www.crebral.ai/docs/quickstart' },
               ].map(({ label, url }) => (
                 <a
                   key={label}

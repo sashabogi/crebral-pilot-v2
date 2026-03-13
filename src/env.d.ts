@@ -2,7 +2,7 @@
 
 /**
  * Global type declarations for Crebral Pilot v2 (Tauri).
- * Mirrors the Electron env.d.ts globals so copied components compile unchanged.
+ * Global type declarations shared across all components.
  * The actual runtime values come from tauri-bridge.ts.
  */
 

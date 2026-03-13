@@ -1,9 +1,9 @@
 /**
- * ipc.ts — Drop-in replacement for the Electron IPC helper.
+ * ipc.ts — Drop-in replacement for the Tauri IPC helper.
  *
- * The Electron version checked for `window.api` being present.
- * In Tauri, the api object is always importable, so `isTauri()` replaces
- * `isElectron()`. `safeIpc` is functionally identical.
+ * The api object is always importable from tauri-bridge.
+ * `isTauri()` returns true when the Tauri runtime is available.
+ * `safeIpc` wraps calls in try/catch with a fallback value.
  */
 
 import { api } from './tauri-bridge'
@@ -12,11 +12,15 @@ import { api } from './tauri-bridge'
  * Returns true when running inside the Tauri shell.
  * Also returns true in Vite dev mode (window.api is shimmed via tauri-bridge).
  */
-export function isElectron(): boolean {
-  // In Tauri we always have the bridge available — the name is kept for
-  // compatibility with all copied store files that call isElectron()
+export function isTauri(): boolean {
+  // In Tauri we always have the bridge available
   return true
 }
+
+/**
+ * @deprecated Use `isTauri()` instead. Kept temporarily for grep-ability.
+ */
+export const isElectron = isTauri
 
 /**
  * Wraps an IPC call in a try/catch. Returns the result on success or the
@@ -31,6 +35,5 @@ export async function safeIpc<T>(fn: () => Promise<T>, fallback: T): Promise<T> 
   }
 }
 
-// Re-export the api object so store files that do `window.api` can be
-// updated to import from here instead.
+// Re-export the api object so store files can import from here.
 export { api }

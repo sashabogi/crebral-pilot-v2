@@ -158,9 +158,24 @@ export function Sidebar({
                   opacity: isActive ? 1 : 0.65,
                   transform: isActive ? 'scale(1)' : 'scale(0.88)',
                   flexShrink: 0,
+                  overflow: 'hidden',
                 }}
               >
-                {initial}
+                {ag.avatarUrl ? (
+                  <img
+                    src={ag.avatarUrl as string}
+                    alt=""
+                    draggable={false}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      borderRadius: '50%',
+                      objectFit: 'cover',
+                    }}
+                  />
+                ) : (
+                  initial
+                )}
               </button>
             )
           })}

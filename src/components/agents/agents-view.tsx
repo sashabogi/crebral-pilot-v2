@@ -130,6 +130,7 @@ interface AgentRow {
   agentId: string;
   displayName: string;
   color?: string;
+  avatarUrl?: string | null;
   provider: string;
   model: string;
   running: boolean;
@@ -261,6 +262,15 @@ export function AgentsView() {
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [savedOrder, setSavedOrder] = useState<string[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragYRef = useRef(0);
+  const dragRowRef = useRef<HTMLDivElement | null>(null);
+  const tableRef = useRef<HTMLDivElement | null>(null);
+  // Live-reorder drag state: holds the current visual order of agent IDs during drag
+  const [dragLiveOrder, setDragLiveOrder] = useState<string[] | null>(null);
+  const dragSourceIndex = useRef<number | null>(null);
+  const dragCurrentIndex = useRef<number | null>(null);
+  const rowRectsRef = useRef<DOMRect[]>([]);
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [singleAgentHbStatus, setSingleAgentHbStatus] = useState<{ running: boolean; lastRun?: string; cycleCount?: number } | null>(null);
   const [isTogglingSingle, setIsTogglingSingle] = useState(false);
@@ -274,15 +284,6 @@ export function AgentsView() {
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const dragHandleActive = useRef(false);
-
-  /* ── Reset drag handle on global mouseup ─────────────────────── */
-
-  useEffect(() => {
-    const resetHandle = () => { dragHandleActive.current = false; };
-    window.addEventListener('mouseup', resetHandle);
-    return () => window.removeEventListener('mouseup', resetHandle);
-  }, []);
 
   /* ── Load agents from IPC ──────────────────────────────────────── */
 
@@ -295,6 +296,7 @@ export function AgentsView() {
           agentId: a.agentId ?? a.id,
           displayName: a.displayName || a.name || a.agentId || a.id || 'Agent',
           color: a.color || undefined,
+          avatarUrl: a.avatarUrl || null,
           provider: a.provider || '',
           model: a.model || '',
           running: a.running ?? false,
@@ -506,77 +508,50 @@ export function AgentsView() {
     }
   };
 
+  /* ── Load min gap from persisted settings on mount ────────────── */
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const settings = await api.settings.get();
+        if (settings && typeof (settings as any).minGapMs === 'number' && (settings as any).minGapMs > 0) {
+          setMinGapMinutes(Math.round((settings as any).minGapMs / 60000));
+        }
+      } catch {
+        // settings not available yet
+      }
+    })();
+  }, []);
+
   /* ── Min gap change ────────────────────────────────────────────── */
 
   const handleMinGapChange = async (newMinutes: number) => {
     const clamped = Math.max(1, Math.min(60, newMinutes));
     setMinGapMinutes(clamped);
+    const ms = clamped * 60000;
     try {
-      await api.coordinator.setMinGap(clamped * 60000);
+      await api.coordinator.setMinGap(ms);
     } catch (err) {
       console.warn('setMinGap failed:', err);
     }
+    // Persist to settings store so it survives app restart
+    try {
+      await api.settings.set({ minGapMs: ms });
+    } catch (err) {
+      console.warn('persist minGapMs failed:', err);
+    }
   };
 
-  /* ── Drag-and-drop reorder ────────────────────────────────────── */
+  /* ── Reorder helpers ─────────────────────────────────────────── */
 
-  const handleDragStart = useCallback(
-    (e: React.DragEvent, index: number) => {
-      setDraggedIndex(index);
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', String(index));
-      // Slight delay so the browser captures the row as drag image first
-      requestAnimationFrame(() => {
-        setDraggedIndex(index);
-      });
-    },
-    [],
-  );
-
-  const handleDragOver = useCallback(
-    (e: React.DragEvent, index: number) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      if (draggedIndex === null || index === draggedIndex) {
-        setDragOverIndex(null);
-        return;
-      }
-      setDragOverIndex(index);
-    },
-    [draggedIndex],
-  );
-
-  const handleDragLeave = useCallback(() => {
-    setDragOverIndex(null);
-  }, []);
-
-  const handleDrop = useCallback(
-    async (e: React.DragEvent, dropIndex: number) => {
-      e.preventDefault();
-      if (draggedIndex === null || draggedIndex === dropIndex) {
-        setDraggedIndex(null);
-        setDragOverIndex(null);
-        return;
-      }
-
-      // Build new order from the currently displayed (merged) agent list
-      const currentOrder = mergedAgents.map((a) => a.agentId);
-      const newOrder = [...currentOrder];
-      const [moved] = newOrder.splice(draggedIndex, 1);
-      newOrder.splice(dropIndex, 0, moved);
-
-      setDraggedIndex(null);
-      setDragOverIndex(null);
-
-      // Always persist the new order to store.json
+  const commitReorder = useCallback(
+    async (newOrder: string[]) => {
       setSavedOrder(newOrder);
       try {
         await api.agents.saveOrder(newOrder);
       } catch (err) {
         console.warn('Save order failed:', err);
       }
-
-      // If orchestrator is running, also update the live coordinator queue
       if (coordStatus?.isRunning) {
         try {
           await api.coordinator.reorder(newOrder);
@@ -586,14 +561,130 @@ export function AgentsView() {
         }
       }
     },
-    [draggedIndex, mergedAgents, coordStatus, fetchCoordStatus],
+    [coordStatus, fetchCoordStatus],
   );
 
-  const handleDragEnd = useCallback(() => {
-    setDraggedIndex(null);
-    setDragOverIndex(null);
-    dragHandleActive.current = false;
-  }, []);
+  /* ── Move up / move down ──────────────────────────────────────── */
+
+  const handleMoveUp = useCallback(
+    async (index: number) => {
+      if (index <= 0) return;
+      const currentOrder = mergedAgents.map((a) => a.agentId);
+      const newOrder = [...currentOrder];
+      [newOrder[index - 1], newOrder[index]] = [newOrder[index], newOrder[index - 1]];
+      await commitReorder(newOrder);
+    },
+    [mergedAgents, commitReorder],
+  );
+
+  const handleMoveDown = useCallback(
+    async (index: number) => {
+      if (index >= mergedAgents.length - 1) return;
+      const currentOrder = mergedAgents.map((a) => a.agentId);
+      const newOrder = [...currentOrder];
+      [newOrder[index], newOrder[index + 1]] = [newOrder[index + 1], newOrder[index]];
+      await commitReorder(newOrder);
+    },
+    [mergedAgents, commitReorder],
+  );
+
+  /* ── Mouse-event drag-and-drop reorder ────────────────────────── */
+
+  // Use a ref to reliably track the drop target across mouse events
+  const dragOverRef = useRef<number | null>(null);
+
+  const handleMouseDragStart = useCallback(
+    (e: React.MouseEvent, index: number) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const row = (e.target as HTMLElement).closest('[data-agent-row]') as HTMLDivElement | null;
+      if (!row || !tableRef.current) return;
+
+      // Snapshot initial row rects before any transforms
+      const rows = tableRef.current.querySelectorAll('[data-agent-row]');
+      const rects: DOMRect[] = [];
+      rows.forEach((r) => rects.push((r as HTMLElement).getBoundingClientRect()));
+      rowRectsRef.current = rects;
+
+      const rowHeight = rects.length > 1 ? rects[1].top - rects[0].top : rects[0]?.height ?? 48;
+      const startY = e.clientY;
+      const initialOrder = mergedAgents.map((a) => a.agentId);
+
+      setDraggedIndex(index);
+      dragYRef.current = 0;
+      setIsDragging(true);
+      setDragLiveOrder([...initialOrder]);
+      setDragOverIndex(null);
+      dragOverRef.current = null;
+      dragRowRef.current = row;
+      dragSourceIndex.current = index;
+      dragCurrentIndex.current = index;
+
+      // Track last known position to avoid redundant state updates
+      let lastOverIndex = index;
+
+      const handleMouseMove = (ev: MouseEvent) => {
+        const deltaY = ev.clientY - startY;
+        dragYRef.current = deltaY;
+
+        // Determine which slot the cursor is over based on the delta
+        // and the original row height. This is stable because we use
+        // the initial snapshot, not live DOM measurements.
+        const rawOffset = Math.round(deltaY / rowHeight);
+        let newIndex = index + rawOffset;
+        newIndex = Math.max(0, Math.min(mergedAgents.length - 1, newIndex));
+
+        if (newIndex !== lastOverIndex) {
+          lastOverIndex = newIndex;
+          dragCurrentIndex.current = newIndex;
+
+          // Build live-reordered list: remove dragged item, insert at new position
+          const reordered = [...initialOrder];
+          const [moved] = reordered.splice(index, 1);
+          reordered.splice(newIndex, 0, moved);
+          setDragLiveOrder(reordered);
+          setDragOverIndex(newIndex);
+          dragOverRef.current = newIndex;
+        }
+      };
+
+      const handleMouseUp = () => {
+        window.removeEventListener('mousemove', handleMouseMove);
+        window.removeEventListener('mouseup', handleMouseUp);
+
+        // Capture the final order BEFORE clearing state
+        const finalIndex = dragCurrentIndex.current;
+        const finalOrder = finalIndex !== null && finalIndex !== index
+          ? (() => {
+              const reordered = [...initialOrder];
+              const [moved] = reordered.splice(index, 1);
+              reordered.splice(finalIndex, 0, moved);
+              return reordered;
+            })()
+          : null;
+
+        // Clear drag visual state
+        setIsDragging(false);
+        dragYRef.current = 0;
+        setDraggedIndex(null);
+        setDragOverIndex(null);
+        setDragLiveOrder(null);
+        dragOverRef.current = null;
+        dragSourceIndex.current = null;
+        dragCurrentIndex.current = null;
+        rowRectsRef.current = [];
+
+        // Persist the reorder if the position actually changed
+        if (finalOrder) {
+          commitReorder(finalOrder);
+        }
+      };
+
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    },
+    [mergedAgents, commitReorder],
+  );
 
   /* ── Toggle agent pause ─────────────────────────────────────── */
 
@@ -925,120 +1016,9 @@ export function AgentsView() {
             </div>
           )}
 
-          {/* ── Summary Metric Cards (multi-agent only) ──────────────── */}
-          {!isSingleAgentMode && <div className="grid grid-cols-4 gap-4">
-            {/* Total Cycles */}
+          {/* ── Orchestration Control Panel (multi-agent only) ─────── */}
+          {!isSingleAgentMode && (
             <div
-              className="p-4"
-              style={{
-                background: 'var(--crebral-bg-card)',
-                border: '1px solid var(--crebral-border-card)',
-                borderLeft: '3px solid var(--crebral-teal-700)',
-                borderRadius: 'var(--crebral-radius-lg)',
-              }}
-            >
-              <div
-                className="text-xs uppercase mb-2"
-                style={{
-                  fontFamily: 'var(--crebral-font-body)',
-                  color: 'var(--crebral-text-muted)',
-                  letterSpacing: '0.08em',
-                }}
-              >
-                Total Cycles
-              </div>
-              <div
-                className="text-2xl font-bold"
-                style={{
-                  fontFamily: 'var(--crebral-font-heading)',
-                  color: 'var(--crebral-teal-500)',
-                  lineHeight: 1.2,
-                }}
-              >
-                {totalCycles}
-              </div>
-            </div>
-
-            {/* Effective Interval */}
-            <div
-              className="p-4"
-              style={{
-                background: 'var(--crebral-bg-card)',
-                border: '1px solid var(--crebral-border-card)',
-                borderLeft: '3px solid var(--crebral-teal-700)',
-                borderRadius: 'var(--crebral-radius-lg)',
-              }}
-            >
-              <div
-                className="text-xs uppercase mb-2"
-                style={{
-                  fontFamily: 'var(--crebral-font-body)',
-                  color: 'var(--crebral-text-muted)',
-                  letterSpacing: '0.08em',
-                }}
-              >
-                Effective Interval
-              </div>
-              <div
-                className="text-sm font-bold"
-                style={{
-                  fontFamily: 'var(--crebral-font-heading)',
-                  color:
-                    totalCycleMinutes > 0
-                      ? 'var(--crebral-text-primary)'
-                      : 'var(--crebral-text-muted)',
-                  lineHeight: 1.3,
-                }}
-              >
-                {totalCycleMinutes > 0
-                  ? `${totalAgents}×${minGapMinutes}m = ${totalCycleMinutes}m cycle`
-                  : '--'}
-              </div>
-            </div>
-
-            {/* Active / Total */}
-            <div
-              className="p-4"
-              style={{
-                background: 'var(--crebral-bg-card)',
-                border: '1px solid var(--crebral-border-card)',
-                borderLeft: '3px solid var(--crebral-teal-700)',
-                borderRadius: 'var(--crebral-radius-lg)',
-              }}
-            >
-              <div
-                className="text-xs uppercase mb-2"
-                style={{
-                  fontFamily: 'var(--crebral-font-body)',
-                  color: 'var(--crebral-text-muted)',
-                  letterSpacing: '0.08em',
-                }}
-              >
-                Active / Total
-              </div>
-              <div
-                className="text-2xl font-bold"
-                style={{
-                  fontFamily: 'var(--crebral-font-heading)',
-                  color:
-                    activeAgents > 0
-                      ? 'var(--crebral-green)'
-                      : 'var(--crebral-text-muted)',
-                  lineHeight: 1.2,
-                }}
-              >
-                {activeAgents}
-                <span
-                  style={{ color: 'var(--crebral-text-muted)', fontWeight: 400 }}
-                >
-                  /{totalAgents}
-                </span>
-              </div>
-            </div>
-
-            {/* Next Synapse */}
-            <div
-              className="p-4"
               style={{
                 background: 'var(--crebral-bg-card)',
                 border: '1px solid var(--crebral-border-card)',
@@ -1046,55 +1026,260 @@ export function AgentsView() {
                   ? '3px solid var(--crebral-teal-500)'
                   : '3px solid var(--crebral-teal-700)',
                 borderRadius: 'var(--crebral-radius-lg)',
+                overflow: 'hidden',
               }}
             >
+              {/* Top row: Min Gap | Next Synapse | Total Cycles */}
               <div
-                className="text-xs uppercase mb-2"
-                style={{
-                  fontFamily: 'var(--crebral-font-body)',
-                  color: 'var(--crebral-text-muted)',
-                  letterSpacing: '0.08em',
-                }}
+                className="grid grid-cols-[1fr_1.4fr_0.8fr]"
+                style={{ borderBottom: '1px solid var(--crebral-border-card)' }}
               >
-                Next Synapse
-              </div>
-              {nextAgentName ? (
-                <>
+                {/* ── Min Gap Control ──────────────────────────── */}
+                <div
+                  className="p-4"
+                  style={{ borderRight: '1px solid var(--crebral-border-card)' }}
+                >
                   <div
-                    className="text-xs truncate mb-1"
+                    className="text-xs uppercase mb-2"
                     style={{
                       fontFamily: 'var(--crebral-font-body)',
-                      color: 'var(--crebral-teal-400)',
-                      fontWeight: 600,
+                      color: 'var(--crebral-text-muted)',
+                      letterSpacing: '0.08em',
                     }}
                   >
-                    {nextAgentName}
+                    Min Gap
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={minGapMinutes}
+                      onChange={(e) => handleMinGapChange(parseInt(e.target.value) || 1)}
+                      style={{
+                        width: '56px',
+                        padding: '4px 8px',
+                        borderRadius: 'var(--crebral-radius-md)',
+                        background: 'var(--crebral-bg-elevated)',
+                        border: '1px solid var(--crebral-border-card)',
+                        color: 'var(--crebral-text-primary)',
+                        fontFamily: 'var(--crebral-font-mono)',
+                        fontSize: '0.875rem',
+                        outline: 'none',
+                      }}
+                    />
+                    <div className="flex flex-col gap-0.5">
+                      <button
+                        onClick={() => handleMinGapChange(minGapMinutes + 1)}
+                        className="p-0.5 rounded hover:bg-white/5"
+                        style={{
+                          color: 'var(--crebral-text-muted)',
+                          background: 'transparent',
+                          border: 'none',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <ChevronUp size={12} />
+                      </button>
+                      <button
+                        onClick={() => handleMinGapChange(minGapMinutes - 1)}
+                        className="p-0.5 rounded hover:bg-white/5"
+                        style={{
+                          color: 'var(--crebral-text-muted)',
+                          background: 'transparent',
+                          border: 'none',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <ChevronDown size={12} />
+                      </button>
+                    </div>
+                    <span
+                      className="text-xs"
+                      style={{
+                        fontFamily: 'var(--crebral-font-body)',
+                        color: 'var(--crebral-text-muted)',
+                      }}
+                    >
+                      min
+                    </span>
                   </div>
                   <div
-                    className="text-xl font-bold"
+                    className="mt-2 text-xs"
                     style={{
                       fontFamily: 'var(--crebral-font-mono)',
-                      color: 'var(--crebral-text-primary)',
-                      letterSpacing: '0.04em',
+                      color: 'var(--crebral-text-tertiary)',
                     }}
                   >
-                    {countdown}
+                    {totalCycleMinutes > 0
+                      ? `${totalAgents} agents \u00d7 ${minGapMinutes}m = ${totalCycleMinutes}m cycle`
+                      : '--'}
                   </div>
-                </>
-              ) : (
-                <div
-                  className="text-xl font-bold"
-                  style={{
-                    fontFamily: 'var(--crebral-font-mono)',
-                    color: 'var(--crebral-text-muted)',
-                    letterSpacing: '0.04em',
-                  }}
-                >
-                  --
                 </div>
-              )}
+
+                {/* ── Next Synapse (center, prominent) ─────────── */}
+                <div
+                  className="p-4 flex flex-col items-center justify-center"
+                  style={{ borderRight: '1px solid var(--crebral-border-card)' }}
+                >
+                  <div
+                    className="text-xs uppercase mb-1"
+                    style={{
+                      fontFamily: 'var(--crebral-font-body)',
+                      color: 'var(--crebral-text-muted)',
+                      letterSpacing: '0.08em',
+                    }}
+                  >
+                    Next Synapse
+                  </div>
+                  {nextAgentName ? (
+                    <>
+                      <div
+                        className="text-sm truncate mb-0.5"
+                        style={{
+                          fontFamily: 'var(--crebral-font-body)',
+                          color: 'var(--crebral-teal-400)',
+                          fontWeight: 600,
+                          maxWidth: '100%',
+                        }}
+                      >
+                        {nextAgentName}
+                      </div>
+                      <div
+                        className="text-2xl font-bold"
+                        style={{
+                          fontFamily: 'var(--crebral-font-mono)',
+                          color: 'var(--crebral-text-primary)',
+                          letterSpacing: '0.06em',
+                          lineHeight: 1.2,
+                        }}
+                      >
+                        {countdown}
+                      </div>
+                    </>
+                  ) : (
+                    <div
+                      className="text-2xl font-bold"
+                      style={{
+                        fontFamily: 'var(--crebral-font-mono)',
+                        color: 'var(--crebral-text-muted)',
+                        letterSpacing: '0.04em',
+                      }}
+                    >
+                      --
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Total Cycles (right) ─────────────────────── */}
+                <div className="p-4 flex flex-col items-center justify-center">
+                  <div
+                    className="text-xs uppercase mb-1"
+                    style={{
+                      fontFamily: 'var(--crebral-font-body)',
+                      color: 'var(--crebral-text-muted)',
+                      letterSpacing: '0.08em',
+                    }}
+                  >
+                    Total Cycles
+                  </div>
+                  <div
+                    className="text-2xl font-bold"
+                    style={{
+                      fontFamily: 'var(--crebral-font-heading)',
+                      color: 'var(--crebral-teal-500)',
+                      lineHeight: 1.2,
+                    }}
+                  >
+                    {totalCycles}
+                  </div>
+                </div>
+              </div>
+
+              {/* Bottom row: Queue Order (full width) */}
+              <div className="px-4 py-3">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span
+                    className="text-xs uppercase"
+                    style={{
+                      fontFamily: 'var(--crebral-font-body)',
+                      color: 'var(--crebral-text-muted)',
+                      letterSpacing: '0.08em',
+                      flexShrink: 0,
+                    }}
+                  >
+                    Queue
+                  </span>
+                  {(() => {
+                    const activeInQueue = queueOrder.filter((id) => !pausedAgentIds.has(id));
+                    const pausedInQueue = agents.filter((a) => pausedAgentIds.has(a.agentId));
+
+                    if (activeInQueue.length === 0 && pausedInQueue.length === 0) {
+                      return (
+                        <span
+                          style={{
+                            fontFamily: 'var(--crebral-font-body)',
+                            fontSize: '0.75rem',
+                            color: 'var(--crebral-text-muted)',
+                          }}
+                        >
+                          No agents in queue
+                        </span>
+                      );
+                    }
+
+                    return (
+                      <>
+                        {activeInQueue.map((agentId, idx) => {
+                          const ag = agents.find((a) => a.agentId === agentId);
+                          const name = ag?.displayName ?? agentId;
+                          return (
+                            <span
+                              key={agentId}
+                              style={{
+                                padding: '3px 10px',
+                                borderRadius: '9999px',
+                                background: 'var(--crebral-bg-elevated)',
+                                border: '1px solid var(--crebral-border-card)',
+                                fontFamily: 'var(--crebral-font-body)',
+                                fontSize: '0.7rem',
+                                color: 'var(--crebral-text-secondary)',
+                              }}
+                            >
+                              <span style={{ color: 'var(--crebral-teal-500)', marginRight: '3px', fontWeight: 700 }}>
+                                {idx + 1}
+                              </span>
+                              {name}
+                            </span>
+                          );
+                        })}
+                        {pausedInQueue.map((ag) => (
+                          <span
+                            key={ag.agentId}
+                            style={{
+                              padding: '3px 10px',
+                              borderRadius: '9999px',
+                              background: 'var(--crebral-bg-elevated)',
+                              border: '1px dashed var(--crebral-border-card)',
+                              fontFamily: 'var(--crebral-font-body)',
+                              fontSize: '0.7rem',
+                              color: 'var(--crebral-text-muted)',
+                              opacity: 0.5,
+                            }}
+                          >
+                            {ag.displayName}
+                            <span style={{ marginLeft: '4px', fontSize: '0.55rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                              paused
+                            </span>
+                          </span>
+                        ))}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
             </div>
-          </div>}
+          )}
 
           {/* ── Agent Table ─────────────────────────────────────────── */}
           <div
@@ -1111,7 +1296,7 @@ export function AgentsView() {
               style={{
                 gridTemplateColumns: isSingleAgentMode
                   ? '1fr 100px 80px'
-                  : '20px 36px 1fr 100px 100px 64px 120px',
+                  : '44px 36px 1fr 100px 100px 64px 120px',
                 gap: '12px',
                 borderBottom: '1px solid var(--crebral-border-subtle)',
                 background: 'var(--crebral-bg-elevated)',
@@ -1138,8 +1323,18 @@ export function AgentsView() {
             </div>
 
             {/* Rows */}
-            {mergedAgents.length > 0 ? (
-              mergedAgents.map((agent, idx) => {
+            <div ref={tableRef}>
+            {(() => {
+              // During drag, render in the live-reordered order so items
+              // visually settle into their new positions without snapping.
+              const displayAgents: AgentRow[] = dragLiveOrder
+                ? dragLiveOrder
+                    .map((id) => mergedAgents.find((a) => a.agentId === id))
+                    .filter(Boolean) as AgentRow[]
+                : mergedAgents;
+
+              return displayAgents.length > 0 ? (
+              displayAgents.map((agent, idx) => {
                 const isFiring = firingId === agent.agentId;
                 const isDeleting = deletingId === agent.agentId;
                 const isPaused = pausedAgentIds.has(agent.agentId);
@@ -1153,64 +1348,123 @@ export function AgentsView() {
                 const queuePos = queueOrder.indexOf(agent.agentId);
 
                 const rowIndex = idx;
+                // Identify the dragged card by its agent ID (stable across reorders)
+                const draggedAgentId = draggedIndex !== null ? mergedAgents[draggedIndex]?.agentId : null;
+                const isBeingDragged = isDragging && agent.agentId === draggedAgentId;
 
                 return (
                   <div
                     key={agent.agentId}
-                    draggable={!isSingleAgentMode}
-                    onDragStart={!isSingleAgentMode ? (e) => {
-                      if (!dragHandleActive.current) {
-                        e.preventDefault();
-                        return;
-                      }
-                      handleDragStart(e, rowIndex);
-                    } : undefined}
-                    onDragOver={!isSingleAgentMode ? (e) => handleDragOver(e, rowIndex) : undefined}
-                    onDragLeave={!isSingleAgentMode ? handleDragLeave : undefined}
-                    onDrop={!isSingleAgentMode ? (e) => handleDrop(e, rowIndex) : undefined}
-                    onDragEnd={!isSingleAgentMode ? handleDragEnd : undefined}
-                    className="grid items-center px-5 py-3 transition-all hover:bg-white/[0.02]"
+                    data-agent-row
+                    className="grid items-center px-5 py-3 hover:bg-white/[0.02]"
                     style={{
                       gridTemplateColumns: isSingleAgentMode
                         ? '1fr 100px 80px'
-                        : '20px 36px 1fr 100px 100px 64px 120px',
+                        : '44px 36px 1fr 100px 100px 64px 120px',
                       gap: '12px',
                       borderBottom: '1px solid var(--crebral-border-subtle)',
-                      opacity: isPaused ? 0.5 : (draggedIndex === rowIndex ? 0.3 : 1),
-                      borderTop: !isSingleAgentMode && dragOverIndex === rowIndex && draggedIndex !== null
-                        ? '2px solid #3AAFB9'
-                        : '2px solid transparent',
+                      opacity: isPaused ? 0.5 : (isBeingDragged ? 0.9 : 1),
+                      position: 'relative',
+                      zIndex: isBeingDragged ? 50 : 1,
+                      transform: isBeingDragged
+                        ? 'scale(1.015)'
+                        : 'scale(1)',
+                      transition: isBeingDragged
+                        ? 'box-shadow 0.15s ease, opacity 0.15s ease, transform 0.1s ease'
+                        : 'transform 0.2s cubic-bezier(0.2, 0, 0, 1), box-shadow 0.2s ease, opacity 0.2s ease',
+                      boxShadow: isBeingDragged
+                        ? '0 8px 24px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(58, 175, 185, 0.15)'
+                        : 'none',
+                      background: isBeingDragged
+                        ? 'var(--crebral-bg-elevated)'
+                        : 'transparent',
+                      borderRadius: isBeingDragged ? 'var(--crebral-radius-md)' : '0',
                     }}
                   >
-                    {/* Drag handle (multi-agent only) */}
+                    {/* Drop indicator line */}
+                    {/* Drag handle + move buttons (multi-agent only) */}
                     {!isSingleAgentMode && (
                     <div
-                      className="cursor-grab active:cursor-grabbing"
                       style={{
-                        color: 'var(--crebral-text-muted)',
                         display: 'flex',
                         alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: '0 2px',
-                        transition: 'color 0.12s ease',
+                        gap: '2px',
                       }}
-                      onMouseEnter={(e) => {
-                        (e.currentTarget as HTMLElement).style.color = 'var(--crebral-text-secondary)';
-                      }}
-                      onMouseLeave={(e) => {
-                        (e.currentTarget as HTMLElement).style.color = 'var(--crebral-text-muted)';
-                      }}
-                      onMouseDown={() => { dragHandleActive.current = true; }}
-                      onMouseUp={() => { dragHandleActive.current = false; }}
                     >
-                      <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor">
-                        <circle cx="2" cy="2" r="1.5"/>
-                        <circle cx="8" cy="2" r="1.5"/>
-                        <circle cx="2" cy="8" r="1.5"/>
-                        <circle cx="8" cy="8" r="1.5"/>
-                        <circle cx="2" cy="14" r="1.5"/>
-                        <circle cx="8" cy="14" r="1.5"/>
-                      </svg>
+                      {/* Drag grip */}
+                      <div
+                        className="cursor-grab active:cursor-grabbing"
+                        style={{
+                          color: 'var(--crebral-text-muted)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          padding: '2px',
+                          transition: 'color 0.12s ease',
+                          userSelect: 'none',
+                        }}
+                        onMouseEnter={(e) => {
+                          (e.currentTarget as HTMLElement).style.color = 'var(--crebral-text-secondary)';
+                        }}
+                        onMouseLeave={(e) => {
+                          (e.currentTarget as HTMLElement).style.color = 'var(--crebral-text-muted)';
+                        }}
+                        onMouseDown={(e) => {
+                          // Pass the index from the ORIGINAL mergedAgents array, not the display order
+                          const origIdx = mergedAgents.findIndex((a) => a.agentId === agent.agentId);
+                          if (origIdx !== -1) handleMouseDragStart(e, origIdx);
+                        }}
+                      >
+                        <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor">
+                          <circle cx="2" cy="2" r="1.5"/>
+                          <circle cx="8" cy="2" r="1.5"/>
+                          <circle cx="2" cy="8" r="1.5"/>
+                          <circle cx="8" cy="8" r="1.5"/>
+                          <circle cx="2" cy="14" r="1.5"/>
+                          <circle cx="8" cy="14" r="1.5"/>
+                        </svg>
+                      </div>
+                      {/* Move up / down buttons */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0px' }}>
+                        <button
+                          onClick={() => handleMoveUp(rowIndex)}
+                          disabled={rowIndex === 0}
+                          title="Move up"
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            cursor: rowIndex === 0 ? 'default' : 'pointer',
+                            color: 'var(--crebral-text-muted)',
+                            padding: '0px',
+                            display: 'flex',
+                            opacity: rowIndex === 0 ? 0.25 : 1,
+                            transition: 'color 0.12s ease, opacity 0.12s ease',
+                          }}
+                          onMouseEnter={(e) => { if (rowIndex > 0) (e.currentTarget as HTMLElement).style.color = 'var(--crebral-teal-500)'; }}
+                          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--crebral-text-muted)'; }}
+                        >
+                          <ChevronUp size={12} />
+                        </button>
+                        <button
+                          onClick={() => handleMoveDown(rowIndex)}
+                          disabled={rowIndex >= mergedAgents.length - 1}
+                          title="Move down"
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            cursor: rowIndex >= mergedAgents.length - 1 ? 'default' : 'pointer',
+                            color: 'var(--crebral-text-muted)',
+                            padding: '0px',
+                            display: 'flex',
+                            opacity: rowIndex >= mergedAgents.length - 1 ? 0.25 : 1,
+                            transition: 'color 0.12s ease, opacity 0.12s ease',
+                          }}
+                          onMouseEnter={(e) => { if (rowIndex < mergedAgents.length - 1) (e.currentTarget as HTMLElement).style.color = 'var(--crebral-teal-500)'; }}
+                          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--crebral-text-muted)'; }}
+                        >
+                          <ChevronDown size={12} />
+                        </button>
+                      </div>
                     </div>
                     )}
 
@@ -1273,9 +1527,24 @@ export function AgentsView() {
                           background: avatarBg,
                           color: 'var(--crebral-bg-deep)',
                           fontFamily: 'var(--crebral-font-heading)',
+                          overflow: 'hidden',
                         }}
                       >
-                        {initial}
+                        {agent.avatarUrl ? (
+                          <img
+                            src={agent.avatarUrl as string}
+                            alt=""
+                            draggable={false}
+                            style={{
+                              width: '100%',
+                              height: '100%',
+                              borderRadius: '50%',
+                              objectFit: 'cover',
+                            }}
+                          />
+                        ) : (
+                          initial
+                        )}
                       </div>
                       <div className="min-w-0">
                         <div
@@ -1491,7 +1760,9 @@ export function AgentsView() {
                   Add your first agent to begin orchestration.
                 </p>
               </div>
-            )}
+            );
+            })()}
+            </div>
 
             {/* Table footer: Add Agent */}
             <div
@@ -1539,186 +1810,6 @@ export function AgentsView() {
             </div>
           </div>
 
-          {/* ── Schedule Settings (multi-agent only) ──────────────── */}
-          {!isSingleAgentMode && <div
-            className="p-6"
-            style={{
-              background: 'var(--crebral-bg-card)',
-              border: '1px solid var(--crebral-border-card)',
-              borderRadius: 'var(--crebral-radius-lg)',
-            }}
-          >
-            <div
-              className="text-xs uppercase mb-5"
-              style={{
-                fontFamily: 'var(--crebral-font-heading)',
-                color: 'var(--crebral-text-tertiary)',
-                fontWeight: 700,
-                letterSpacing: '0.12em',
-              }}
-            >
-              Schedule Settings
-            </div>
-
-            <div className="grid grid-cols-2 gap-6">
-              {/* Min Gap */}
-              <div>
-                <div
-                  className="text-xs uppercase mb-3"
-                  style={{
-                    fontFamily: 'var(--crebral-font-body)',
-                    color: 'var(--crebral-text-muted)',
-                    letterSpacing: '0.08em',
-                  }}
-                >
-                  Min Gap (Minutes)
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={1}
-                    max={60}
-                    value={minGapMinutes}
-                    onChange={(e) => handleMinGapChange(parseInt(e.target.value) || 1)}
-                    style={{
-                      width: '72px',
-                      padding: '6px 10px',
-                      borderRadius: 'var(--crebral-radius-md)',
-                      background: 'var(--crebral-bg-elevated)',
-                      border: '1px solid var(--crebral-border-card)',
-                      color: 'var(--crebral-text-primary)',
-                      fontFamily: 'var(--crebral-font-mono)',
-                      fontSize: '0.875rem',
-                      outline: 'none',
-                    }}
-                  />
-                  <div className="flex flex-col gap-0.5">
-                    <button
-                      onClick={() => handleMinGapChange(minGapMinutes + 1)}
-                      className="p-0.5 rounded hover:bg-white/5"
-                      style={{
-                        color: 'var(--crebral-text-muted)',
-                        background: 'transparent',
-                        border: 'none',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      <ChevronUp size={12} />
-                    </button>
-                    <button
-                      onClick={() => handleMinGapChange(minGapMinutes - 1)}
-                      className="p-0.5 rounded hover:bg-white/5"
-                      style={{
-                        color: 'var(--crebral-text-muted)',
-                        background: 'transparent',
-                        border: 'none',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      <ChevronDown size={12} />
-                    </button>
-                  </div>
-                </div>
-
-                <div
-                  className="mt-3 text-xs"
-                  style={{
-                    fontFamily: 'var(--crebral-font-body)',
-                    color: 'var(--crebral-text-tertiary)',
-                  }}
-                >
-                  Per-Agent Interval:{' '}
-                  <span style={{ color: 'var(--crebral-text-secondary)', fontWeight: 600 }}>
-                    {totalAgents > 0
-                      ? `${totalAgents} agents × ${minGapMinutes}m gap = ${totalCycleMinutes}m cycle`
-                      : '--'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Queue Order */}
-              <div>
-                <div
-                  className="text-xs uppercase mb-3"
-                  style={{
-                    fontFamily: 'var(--crebral-font-body)',
-                    color: 'var(--crebral-text-muted)',
-                    letterSpacing: '0.08em',
-                  }}
-                >
-                  Queue Order
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {(() => {
-                    const activeInQueue = queueOrder.filter((id) => !pausedAgentIds.has(id));
-                    const pausedInQueue = agents.filter((a) => pausedAgentIds.has(a.agentId));
-
-                    if (activeInQueue.length === 0 && pausedInQueue.length === 0) {
-                      return (
-                        <span
-                          style={{
-                            fontFamily: 'var(--crebral-font-body)',
-                            fontSize: '0.75rem',
-                            color: 'var(--crebral-text-muted)',
-                          }}
-                        >
-                          No agents in queue
-                        </span>
-                      );
-                    }
-
-                    return (
-                      <>
-                        {activeInQueue.map((agentId, idx) => {
-                          const ag = agents.find((a) => a.agentId === agentId);
-                          const name = ag?.displayName ?? agentId;
-                          return (
-                            <span
-                              key={agentId}
-                              style={{
-                                padding: '4px 10px',
-                                borderRadius: '9999px',
-                                background: 'var(--crebral-bg-elevated)',
-                                border: '1px solid var(--crebral-border-card)',
-                                fontFamily: 'var(--crebral-font-body)',
-                                fontSize: '0.75rem',
-                                color: 'var(--crebral-text-secondary)',
-                              }}
-                            >
-                              <span style={{ color: 'var(--crebral-text-muted)', marginRight: '4px' }}>
-                                {idx + 1}.
-                              </span>
-                              {name}
-                            </span>
-                          );
-                        })}
-                        {pausedInQueue.map((ag) => (
-                          <span
-                            key={ag.agentId}
-                            style={{
-                              padding: '4px 10px',
-                              borderRadius: '9999px',
-                              background: 'var(--crebral-bg-elevated)',
-                              border: '1px dashed var(--crebral-border-card)',
-                              fontFamily: 'var(--crebral-font-body)',
-                              fontSize: '0.75rem',
-                              color: 'var(--crebral-text-muted)',
-                              opacity: 0.5,
-                            }}
-                          >
-                            {ag.displayName}
-                            <span style={{ marginLeft: '4px', fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                              paused
-                            </span>
-                          </span>
-                        ))}
-                      </>
-                    );
-                  })()}
-                </div>
-              </div>
-            </div>
-          </div>}
 
         </div>
       </div>

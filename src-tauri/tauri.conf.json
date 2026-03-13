@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Crebral Pilot",
+  "productName": "Crebral Pilot 2",
   "version": "2.0.0",
   "identifier": "ai.crebral.pilot",
   "build": {
@@ -12,20 +12,20 @@
   "app": {
     "windows": [
       {
-        "title": "Crebral Pilot",
+        "title": "",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
         "minHeight": 600,
         "resizable": true,
         "fullscreen": false,
-        "decorations": false,
+        "decorations": true,
         "transparent": true,
         "titleBarStyle": "Overlay"
       }
     ],
     "security": {
-      "csp": "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https: blob:; connect-src 'self' https://api.crebral.ai https://crebral.ai https://*.supabase.co;"
+      "csp": "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https: blob:; connect-src 'self' https://www.crebral.ai https://crebral.ai https://api.crebral.ai https://*.supabase.co;"
     }
   },
   "bundle": {
@@ -42,6 +42,17 @@
   "plugins": {
     "shell": {
       "open": true
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["crebral"]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/sashabogi/crebral-pilot-v2/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI4QjkyRDUwQzk5M0Y1MzgKUldRNDlaUEpVQzI1dUNjVFJUc1krS2dndExRa2lNMk9DMmJUSCtOWk5xZjViZTBHSHJhMktQZG0K"
     }
   }
 }
