@@ -125,15 +125,15 @@ jobs:
           echo "=== Signing updater bundles ==="
 
           # Sign macOS updater bundles (.app.tar.gz)
-          for f in $(find "$BUNDLE_DIR" -name "*.app.tar.gz" -type f 2>/dev/null); do
+          find "$BUNDLE_DIR" -name "*.app.tar.gz" -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
             echo "Signing: $f"
-            pnpm tauri signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$f" || echo "Sign failed: $f"
+            pnpm tauri signer sign "$f" || echo "Sign failed: $f"
           done
 
           # Sign Windows updater bundles (.nsis.zip, .msi.zip)
-          for f in $(find "$BUNDLE_DIR" \( -name "*.nsis.zip" -o -name "*.msi.zip" \) -not -name "*.sig" -type f 2>/dev/null); do
+          find "$BUNDLE_DIR" \( -name "*.nsis.zip" -o -name "*.msi.zip" \) -not -name "*.sig" -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
             echo "Signing: $f"
-            pnpm tauri signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$f" || echo "Sign failed: $f"
+            pnpm tauri signer sign "$f" || echo "Sign failed: $f"
           done
 
           # Rename macOS .app.tar.gz with arch suffix to avoid collisions
@@ -144,7 +144,7 @@ jobs:
               *)         ARCH_TAG="" ;;
             esac
             if [ -n "$ARCH_TAG" ]; then
-              for f in $(find "$BUNDLE_DIR" -name "*.app.tar.gz" -not -name "*.sig" -type f 2>/dev/null); do
+              find "$BUNDLE_DIR" -name "*.app.tar.gz" -not -name "*.sig" -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
                 dir=$(dirname "$f")
                 base=$(basename "$f" .app.tar.gz)
                 newname="${dir}/${base}_${ARCH_TAG}.app.tar.gz"
