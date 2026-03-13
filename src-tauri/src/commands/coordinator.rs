@@ -36,7 +36,14 @@ pub async fn coordinator_start(
 
         // Resolve Crebral API key: keychain first, then JSON config fallback
         let api_key = match keychain::get_agent_api_key(agent_id) {
-            Ok(Some(key)) => key,
+            Ok(Some(key)) => {
+                log::info!(
+                    "coordinator: API key from KEYCHAIN for {} ({})",
+                    agent.display_name,
+                    agent_id
+                );
+                key
+            }
             _ => {
                 // Fall back to JSON config (obfuscated base64)
                 match agent.api_key_enc.as_ref().and_then(|enc| crate::services::store::deobfuscate(enc)) {
@@ -47,7 +54,9 @@ pub async fn coordinator_start(
                             agent_id
                         );
                         // Re-store to keychain for next time
-                        let _ = keychain::store_agent_api_key(agent_id, &key);
+                        if let Err(e) = keychain::store_agent_api_key(agent_id, &key) {
+                            log::warn!("coordinator: FAILED to re-store API key to keychain for {}: {}", agent_id, e);
+                        }
                         key
                     }
                     None => {
@@ -63,22 +72,32 @@ pub async fn coordinator_start(
         };
 
         // Resolve provider API key: keychain first, then JSON config fallback (optional — for BYOK agents)
-        let provider_api_key = keychain::get_provider_key(agent_id)
-            .ok()
-            .flatten()
-            .or_else(|| {
+        let provider_api_key = match keychain::get_provider_key(agent_id) {
+            Ok(Some(key)) => {
+                log::info!(
+                    "coordinator: provider key from KEYCHAIN for {} ({})",
+                    agent.display_name,
+                    agent_id
+                );
+                Some(key)
+            }
+            _ => {
+                // Fall back to JSON config
                 agent.provider_key_enc.as_ref().and_then(|enc| {
                     let key = crate::services::store::deobfuscate(enc)?;
                     log::info!(
-                        "coordinator: recovered provider key from JSON fallback for {} ({})",
+                        "coordinator: provider key from JSON FALLBACK for {} ({})",
                         agent.display_name,
                         agent_id
                     );
                     // Re-store to keychain for next time
-                    let _ = keychain::store_provider_key(agent_id, &key);
+                    if let Err(e) = keychain::store_provider_key(agent_id, &key) {
+                        log::warn!("coordinator: FAILED to re-store provider key to keychain for {}: {}", agent_id, e);
+                    }
                     Some(key)
                 })
-            });
+            }
+        };
 
         // Convert per-agent interval_ms (from Brain settings) to interval_hours
         let interval_hours = agent.interval_ms.map(|ms| ms as f64 / 3_600_000.0);

@@ -75,13 +75,17 @@ pub struct HeartbeatHandle {
 }
 
 /// Gateway cycle request body — matches @crebral/core GatewayClient.runCycle() exactly.
-/// All fields always serialized (gateway validates presence, not just value).
+/// Field names are snake_case (gateway accepts snake_case).
+/// Optional fields are omitted when None (matching JS undefined behavior).
 #[derive(Debug, Serialize)]
 struct GatewayCycleRequest {
     agent_id: String,
     api_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     provider_key: Option<String>,
 }
 
@@ -161,6 +165,14 @@ impl HeartbeatService {
             }
         });
 
+        // Log provider_key presence (never log actual key value)
+        if let Some(ref pk) = config.provider_api_key {
+            let last4 = &pk[pk.len().saturating_sub(4)..];
+            log::info!("heartbeat: run_cycle for {} — provider_key present (ends ...{})", agent_id, last4);
+        } else {
+            log::info!("heartbeat: run_cycle for {} — NO provider_key", agent_id);
+        }
+
         // Build request — matches @crebral/core GatewayClient format (snake_case fields)
         let body = GatewayCycleRequest {
             agent_id: agent_id.to_string(),
@@ -181,33 +193,83 @@ impl HeartbeatService {
             }),
         );
 
-        let resp = http
+        let resp = match http
             .post(GATEWAY_CYCLE_URL)
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("HTTP request failed: {}", e);
+                let _ = app_handle.emit(
+                    "heartbeat:thought",
+                    serde_json::json!({
+                        "agentId": agent_id,
+                        "type": "error",
+                        "message": &msg,
+                        "timestamp": Utc::now().to_rfc3339(),
+                    }),
+                );
+                return Err(msg);
+            }
+        };
 
         let status_code = resp.status();
         if !status_code.is_success() {
             let err_text = resp.text().await.unwrap_or_default();
-            return Err(format!(
+            let msg = format!(
                 "Gateway returned {}: {}",
                 status_code.as_u16(),
                 err_text
-            ));
+            );
+            let _ = app_handle.emit(
+                "heartbeat:thought",
+                serde_json::json!({
+                    "agentId": agent_id,
+                    "type": "error",
+                    "message": &msg,
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            return Err(msg);
         }
 
         // Gateway wraps response in { "data": { ... } } — unwrap like @crebral/core does
-        let envelope: GatewayEnvelope = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse gateway response: {}", e))?;
+        let envelope: GatewayEnvelope = match resp.json().await {
+            Ok(e) => e,
+            Err(e) => {
+                let msg = format!("Failed to parse gateway response: {}", e);
+                let _ = app_handle.emit(
+                    "heartbeat:thought",
+                    serde_json::json!({
+                        "agentId": agent_id,
+                        "type": "error",
+                        "message": &msg,
+                        "timestamp": Utc::now().to_rfc3339(),
+                    }),
+                );
+                return Err(msg);
+            }
+        };
 
-        let gateway_resp = envelope
-            .data
-            .ok_or_else(|| "Gateway returned null data".to_string())?;
+        let gateway_resp = match envelope.data {
+            Some(d) => d,
+            None => {
+                let msg = "Gateway returned null data".to_string();
+                let _ = app_handle.emit(
+                    "heartbeat:thought",
+                    serde_json::json!({
+                        "agentId": agent_id,
+                        "type": "error",
+                        "message": &msg,
+                        "timestamp": Utc::now().to_rfc3339(),
+                    }),
+                );
+                return Err(msg);
+            }
+        };
 
         let duration_ms = gateway_resp
             .duration_ms
@@ -235,12 +297,18 @@ impl HeartbeatService {
         // Emit individual action thoughts from the gateway response
         if let Some(ref actions) = gateway_resp.actions {
             for action_val in actions {
-                // Support both camelCase (API) and snake_case field names
+                // Support camelCase, snake_case, and bare "type" field names
                 let action_type = action_val
                     .get("actionType")
                     .or_else(|| action_val.get("action_type"))
+                    .or_else(|| action_val.get("type"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
+
+                // Log raw action for debugging unknown types
+                if action_type == "unknown" {
+                    log::warn!("heartbeat: unknown action type, raw JSON: {}", action_val);
+                }
 
                 let content = action_val
                     .get("content")
@@ -323,6 +391,7 @@ impl HeartbeatService {
             for a in actions {
                 let t = a.get("actionType")
                     .or_else(|| a.get("action_type"))
+                    .or_else(|| a.get("type"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 match t {

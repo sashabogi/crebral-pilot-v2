@@ -6,6 +6,7 @@ pub mod store;
 pub mod heartbeat;
 pub mod coordinator;
 pub mod fleet;
+pub mod telemetry;
 
 pub use gateway::Gateway;
 pub use store::Store;

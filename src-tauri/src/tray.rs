@@ -3,7 +3,7 @@
 //! Provides a macOS menu-bar icon with orchestration status,
 //! recent thoughts, and quick controls.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use tauri::{
@@ -15,9 +15,7 @@ use tauri::{
 use tokio::sync::Mutex;
 
 /// Maximum number of recent thoughts kept in the circular buffer.
-const MAX_THOUGHTS: usize = 5;
-/// Maximum display characters per thought line in the tray menu.
-const THOUGHT_DISPLAY_LEN: usize = 50;
+const MAX_THOUGHTS: usize = 8;
 /// Tray icon dimensions (22x22).
 const TRAY_ICON_SIZE: u32 = 22;
 
@@ -33,7 +31,12 @@ pub struct TrayState {
     pub agent_count: usize,
     pub next_agent_name: Option<String>,
     pub next_in_secs: Option<i64>,
+    /// Raw RFC3339 timestamp for the next scheduled fire — kept so periodic
+    /// refresh can recompute `next_in_secs` without a new event.
+    pub next_scheduled_at: Option<String>,
     pub recent_thoughts: VecDeque<String>,
+    /// Maps agent_id → human-readable display name (populated from store).
+    pub display_names: HashMap<String, String>,
 }
 
 impl TrayState {
@@ -43,7 +46,9 @@ impl TrayState {
             agent_count: 0,
             next_agent_name: None,
             next_in_secs: None,
+            next_scheduled_at: None,
             recent_thoughts: VecDeque::with_capacity(MAX_THOUGHTS + 1),
+            display_names: HashMap::new(),
         }
     }
 
@@ -132,6 +137,12 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
+                    // Store raw timestamp for periodic refresh.
+                    ts.next_scheduled_at = status
+                        .get("nextScheduledAt")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
                     // Compute seconds until next scheduled fire.
                     ts.next_in_secs = status
                         .get("nextScheduledAt")
@@ -142,6 +153,21 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                             let diff = dt.signed_duration_since(now);
                             diff.num_seconds().max(0)
                         });
+                }
+
+                // Populate display names from store so the menu shows
+                // human-readable names instead of UUIDs.
+                let app_state = app_h.state::<crate::state::AppState>();
+                if let Ok(user_id) = app_state.store.active_user_id() {
+                    if let Ok(agents) = app_state.store.get_agents(&user_id) {
+                        let mut ts = state_arc.lock().await;
+                        for agent in &agents {
+                            ts.display_names.insert(
+                                agent.agent_id.clone(),
+                                agent.display_name.clone(),
+                            );
+                        }
+                    }
                 }
 
                 // Update icon and menu.
@@ -169,24 +195,87 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     .get("message")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let thought_type = payload
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("info");
 
                 if message.is_empty() {
                     return;
                 }
 
-                // Build display string: "[agent_short] message"
-                // Use last segment of agent_id or first 12 chars as short name.
-                let agent_short = if agent_id.len() > 12 {
-                    &agent_id[..12]
-                } else {
-                    agent_id
+                // Only show actions and errors — skip info and decision noise.
+                if thought_type != "action" && thought_type != "error" {
+                    return;
+                }
+
+                // Resolve agent display name from the cached map.
+                let agent_name = {
+                    let ts = state_arc.lock().await;
+                    ts.display_names
+                        .get(agent_id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            if agent_id.len() > 10 {
+                                agent_id[..10].to_string()
+                            } else {
+                                agent_id.to_string()
+                            }
+                        })
                 };
 
-                let full = format!("[{}] {}", agent_short, message);
-                let display = if full.len() > THOUGHT_DISPLAY_LEN {
-                    format!("{}...", &full[..THOUGHT_DISPLAY_LEN])
+                // Build a concise summary from the raw message.
+                let short_message = if thought_type == "error" {
+                    if message.contains("PROVIDER_AUTH_ERROR") {
+                        "auth error".to_string()
+                    } else if message.contains("NETWORK_ERROR") || message.contains("timed out") {
+                        "timeout".to_string()
+                    } else if message.contains("TOKEN_LIMIT") {
+                        "token limit".to_string()
+                    } else if message.contains("RATE_LIMIT") {
+                        "rate limited".to_string()
+                    } else {
+                        "error".to_string()
+                    }
                 } else {
-                    full
+                    // Action type — extract a short verb + optional preview.
+                    if message.starts_with("Created a post") {
+                        let preview = message.strip_prefix("Created a post: ").unwrap_or("");
+                        if preview.is_empty() {
+                            "posted".to_string()
+                        } else {
+                            let short = if preview.len() > 30 { &preview[..30] } else { preview };
+                            format!("posted: {}", short)
+                        }
+                    } else if message.starts_with("Commented") {
+                        let preview = message.strip_prefix("Commented: ").unwrap_or("");
+                        if preview.is_empty() {
+                            "commented".to_string()
+                        } else {
+                            let short = if preview.len() > 30 { &preview[..30] } else { preview };
+                            format!("commented: {}", short)
+                        }
+                    } else if message.starts_with("Upvoted") {
+                        "upvoted".to_string()
+                    } else if message.starts_with("Downvoted") {
+                        "downvoted".to_string()
+                    } else if message.starts_with("Followed") {
+                        "followed a community".to_string()
+                    } else if message.starts_with("Skipped") {
+                        "skipped".to_string()
+                    } else if message.starts_with("Created community") {
+                        "created community".to_string()
+                    } else {
+                        // Fallback: truncate the raw message.
+                        let short = if message.len() > 35 { &message[..35] } else { message };
+                        short.to_string()
+                    }
+                };
+
+                let display = if thought_type == "error" {
+                    format!("{} \u{2014} \u{26a0} {}", agent_name, short_message)
+                } else {
+                    format!("{} \u{2014} {}", agent_name, short_message)
                 };
 
                 {
@@ -199,6 +288,34 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             });
         }
     });
+
+    // ── Periodic countdown refresh (every 30s) ───────────────────────
+    {
+        let state_for_timer = tray_state.clone();
+        let app_for_timer = app.clone();
+        let tray_id_for_timer = tray.id().clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                {
+                    let mut ts = state_for_timer.lock().await;
+                    if !ts.is_running {
+                        continue;
+                    }
+                    if let Some(ref raw) = ts.next_scheduled_at.clone() {
+                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+                            let now = chrono::Utc::now();
+                            let diff = dt.signed_duration_since(now);
+                            ts.next_in_secs = Some(diff.num_seconds().max(0));
+                        }
+                    }
+                }
+                let ts = state_for_timer.lock().await;
+                update_tray(&app_for_timer, &tray_id_for_timer, &ts);
+            }
+        });
+    }
 
     Ok(())
 }
@@ -222,7 +339,19 @@ fn build_menu(
 
     // 2. Next synapse (only when active).
     if state.is_running {
-        if let Some(ref next_name) = state.next_agent_name {
+        if let Some(ref next_id) = state.next_agent_name {
+            let display_name = state
+                .display_names
+                .get(next_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    // Fallback: use first 8 chars of UUID
+                    if next_id.len() > 8 {
+                        next_id[..8].to_string()
+                    } else {
+                        next_id.clone()
+                    }
+                });
             let time_str = match state.next_in_secs {
                 Some(secs) if secs > 0 => {
                     let mins = secs / 60;
@@ -231,7 +360,7 @@ fn build_menu(
                 }
                 _ => "soon".to_string(),
             };
-            let next_text = format!("Next: {} in {}", next_name, time_str);
+            let next_text = format!("Next: {} in {}", display_name, time_str);
             let next_item =
                 MenuItem::with_id(app, ID_NEXT_SYNAPSE, &next_text, false, None::<&str>)?;
             menu.append(&next_item)?;
@@ -253,8 +382,8 @@ fn build_menu(
     // Separator
     menu.append(&PredefinedMenuItem::separator(app)?)?;
 
-    // 4. Recent thoughts (last 3 displayed, disabled labels).
-    let thoughts: Vec<&String> = state.recent_thoughts.iter().take(3).collect();
+    // 4. Recent thoughts (last 5 displayed, disabled labels).
+    let thoughts: Vec<&String> = state.recent_thoughts.iter().take(5).collect();
     if !thoughts.is_empty() {
         for (i, thought) in thoughts.iter().enumerate() {
             let item_id = format!("tray_thought_{}", i);

@@ -48,6 +48,9 @@ pub fn run() {
             // Set up system tray (menu bar icon with orchestration controls).
             tray::setup(app.handle())?;
 
+            // Set up error telemetry listener (fire-and-forget reporting).
+            services::telemetry::setup(app.handle());
+
             // Listen for deep link URL events and route auth callbacks
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {

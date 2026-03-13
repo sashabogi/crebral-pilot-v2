@@ -272,6 +272,8 @@ pub async fn agents_add(
             // Primary: OS keychain
             if let Err(e) = keychain::store_agent_api_key(&agent_id, key) {
                 log::warn!("agents_add: keychain store failed for crebralApiKey: {}", e);
+            } else {
+                log::info!("agents_add: crebralApiKey stored to KEYCHAIN for {}", agent_id);
             }
             // Fallback: obfuscated in JSON config
             let enc = crate::services::store::obfuscate(key);
@@ -285,6 +287,8 @@ pub async fn agents_add(
             // Primary: OS keychain
             if let Err(e) = keychain::store_provider_key(&agent_id, key) {
                 log::warn!("agents_add: keychain store failed for providerApiKey: {}", e);
+            } else {
+                log::info!("agents_add: providerApiKey stored to KEYCHAIN for {}", agent_id);
             }
             // Fallback: obfuscated in JSON config
             let enc = crate::services::store::obfuscate(key);

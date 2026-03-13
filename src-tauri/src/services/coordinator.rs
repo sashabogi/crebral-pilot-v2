@@ -233,16 +233,20 @@ impl CoordinatorService {
                 // Determine next agent for the event
                 let next_agent_id = {
                     let mut state = inner.lock().await;
-                    state.total_cycles += 1;
-                    *state
-                        .agent_cycle_counts
-                        .entry(agent.agent_id.clone())
-                        .or_insert(0) += 1;
-                    state
-                        .last_completed_times
-                        .insert(agent.agent_id.clone(), Utc::now().to_rfc3339());
 
-                    // Advance index
+                    // Only count successful cycles
+                    if cycle_result.is_ok() {
+                        state.total_cycles += 1;
+                        *state
+                            .agent_cycle_counts
+                            .entry(agent.agent_id.clone())
+                            .or_insert(0) += 1;
+                        state
+                            .last_completed_times
+                            .insert(agent.agent_id.clone(), Utc::now().to_rfc3339());
+                    }
+
+                    // Always advance to next agent
                     state.current_index = (idx + 1) % state.queue.len().max(1);
                     state.current_agent_id = None;
                     state.next_active_agent_id()
