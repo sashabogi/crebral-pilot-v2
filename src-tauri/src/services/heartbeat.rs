@@ -9,6 +9,23 @@ use tokio_util::sync::CancellationToken;
 
 const GATEWAY_CYCLE_URL: &str = "https://gateway.crebral.ai/api/v1/agent/cycle";
 
+/// Truncate a string to `max_chars` characters, appending "..." if truncated.
+/// Preserves whole words when possible.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() <= max_chars {
+        return trimmed.to_string();
+    }
+    let truncated = &trimmed[..max_chars];
+    // Try to break at the last space to avoid cutting mid-word
+    if let Some(last_space) = truncated.rfind(' ') {
+        if last_space > max_chars / 2 {
+            return format!("{}...", &truncated[..last_space]);
+        }
+    }
+    format!("{}...", truncated)
+}
+
 // ── Types ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,14 +66,6 @@ pub struct HeartbeatResult {
 pub struct TokenUsage {
     pub input: u64,
     pub output: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ThoughtEvent {
-    pub agent_id: String,
-    pub message: String,
-    pub timestamp: String,
 }
 
 /// Handle for a running heartbeat task — holds the cancel token and status.
@@ -136,11 +145,12 @@ impl HeartbeatService {
         };
         let _ = app_handle.emit(
             "heartbeat:thought",
-            ThoughtEvent {
-                agent_id: agent_id.to_string(),
-                message: format!("Starting heartbeat cycle...{}", model_info),
-                timestamp: Utc::now().to_rfc3339(),
-            },
+            serde_json::json!({
+                "agentId": agent_id,
+                "type": "info",
+                "message": format!("Starting heartbeat cycle...{}", model_info),
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
         );
 
         // Normalize provider name to what the gateway expects
@@ -163,11 +173,12 @@ impl HeartbeatService {
         // Emit thought: calling gateway
         let _ = app_handle.emit(
             "heartbeat:thought",
-            ThoughtEvent {
-                agent_id: agent_id.to_string(),
-                message: "Calling Gateway cycle API...".to_string(),
-                timestamp: Utc::now().to_rfc3339(),
-            },
+            serde_json::json!({
+                "agentId": agent_id,
+                "type": "info",
+                "message": "Calling Gateway cycle API...",
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
         );
 
         let resp = http
@@ -221,17 +232,97 @@ impl HeartbeatService {
                 .unwrap_or(0),
         };
 
+        // Emit individual action thoughts from the gateway response
+        if let Some(ref actions) = gateway_resp.actions {
+            for action_val in actions {
+                // Support both camelCase (API) and snake_case field names
+                let action_type = action_val
+                    .get("actionType")
+                    .or_else(|| action_val.get("action_type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+
+                let content = action_val
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                let reasoning = action_val
+                    .get("reasoning")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                // Build a human-readable message for each action type
+                let action_message = match action_type {
+                    "post" => {
+                        let preview = truncate_str(content, 80);
+                        if preview.is_empty() {
+                            "Created a post".to_string()
+                        } else {
+                            format!("Created a post: {}", preview)
+                        }
+                    }
+                    "comment" => {
+                        let preview = truncate_str(content, 80);
+                        if preview.is_empty() {
+                            "Commented on a post".to_string()
+                        } else {
+                            format!("Commented: {}", preview)
+                        }
+                    }
+                    "upvote" => "Upvoted a post".to_string(),
+                    "downvote" => "Downvoted a post".to_string(),
+                    "follow" => "Followed a community".to_string(),
+                    "skip" => {
+                        let preview = truncate_str(reasoning, 60);
+                        if preview.is_empty() {
+                            "Skipped".to_string()
+                        } else {
+                            format!("Skipped — {}", preview)
+                        }
+                    }
+                    "create_community" => "Created community".to_string(),
+                    other => format!("Action: {}", other),
+                };
+
+                let _ = app_handle.emit(
+                    "heartbeat:thought",
+                    serde_json::json!({
+                        "agentId": agent_id,
+                        "type": "action",
+                        "message": action_message,
+                        "timestamp": Utc::now().to_rfc3339(),
+                    }),
+                );
+
+                // Emit reasoning as a separate "decision" thought if present
+                if !reasoning.is_empty() && action_type != "skip" {
+                    let reasoning_preview = truncate_str(reasoning, 100);
+                    let _ = app_handle.emit(
+                        "heartbeat:thought",
+                        serde_json::json!({
+                            "agentId": agent_id,
+                            "type": "decision",
+                            "message": format!("Reasoning: {}", reasoning_preview),
+                            "timestamp": Utc::now().to_rfc3339(),
+                        }),
+                    );
+                }
+            }
+        }
+
         // Emit thought: cycle complete
         let _ = app_handle.emit(
             "heartbeat:thought",
-            ThoughtEvent {
-                agent_id: agent_id.to_string(),
-                message: format!(
+            serde_json::json!({
+                "agentId": agent_id,
+                "type": "info",
+                "message": format!(
                     "Cycle complete — {} actions, {} input / {} output tokens",
                     actions_taken, token_usage.input, token_usage.output
                 ),
-                timestamp: Utc::now().to_rfc3339(),
-            },
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
         );
 
         let result = HeartbeatResult {
@@ -309,11 +400,12 @@ impl HeartbeatService {
                             log::error!("Heartbeat cycle failed for {}: {}", agent_id, e);
                             let _ = app_handle.emit(
                                 "heartbeat:thought",
-                                ThoughtEvent {
-                                    agent_id: agent_id.clone(),
-                                    message: format!("Cycle failed: {}", e),
-                                    timestamp: Utc::now().to_rfc3339(),
-                                },
+                                serde_json::json!({
+                                    "agentId": agent_id,
+                                    "type": "error",
+                                    "message": format!("Cycle failed: {}", e),
+                                    "timestamp": Utc::now().to_rfc3339(),
+                                }),
                             );
                         }
                     }

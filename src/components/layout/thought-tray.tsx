@@ -7,7 +7,7 @@ import { useHeartbeatStore, type ThoughtEvent } from '../../store/heartbeat-stor
 import { useAppStore } from '../../store/app-store'
 import { api } from '../../lib/tauri-bridge'
 import {
-  Brain, X, Trash2, Zap, Activity, GitBranch, Sparkles, Cable, AlertTriangle, Info,
+  Brain, X, Trash2, Zap, Activity, Sparkles, AlertTriangle, Info, CheckCircle2, Lightbulb,
 } from 'lucide-react'
 
 const AGENT_COLORS = [
@@ -34,9 +34,9 @@ const TRAY_PANEL_WIDTH = 320
 const THOUGHT_ICONS: Record<string, React.ReactNode> = {
   info: <Zap size={13} style={{ color: 'var(--crebral-teal-400)' }} />,
   scoring: <Activity size={13} style={{ color: 'var(--crebral-amber-400)' }} />,
-  decision: <GitBranch size={13} style={{ color: 'var(--crebral-teal-500)' }} />,
+  decision: <Lightbulb size={13} style={{ color: 'var(--crebral-teal-500)' }} />,
   generating: <Sparkles size={13} style={{ color: 'var(--crebral-amber-500)' }} />,
-  action: <Cable size={13} style={{ color: 'var(--crebral-green)' }} />,
+  action: <CheckCircle2 size={13} style={{ color: 'var(--crebral-green)' }} />,
   error: <AlertTriangle size={13} style={{ color: 'var(--crebral-red)' }} />,
 }
 
@@ -45,6 +45,26 @@ const DEFAULT_ICON = <Info size={13} style={{ color: 'var(--crebral-text-muted)'
 function formatTime(iso: string): string {
   const d = new Date(iso)
   return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+/**
+ * Splits an action message into a label and content preview.
+ * E.g. "Created a post: The quick brown fox..." → <strong>Created a post:</strong> <em>The quick brown fox...</em>
+ */
+function formatActionMessage(message: string): React.ReactNode {
+  const colonIdx = message.indexOf(':')
+  if (colonIdx === -1 || colonIdx > 30) {
+    // No content preview, just a label like "Upvoted a post"
+    return <strong style={{ fontWeight: 600 }}>{message}</strong>
+  }
+  const label = message.slice(0, colonIdx + 1)
+  const preview = message.slice(colonIdx + 1).trim()
+  return (
+    <>
+      <strong style={{ fontWeight: 600 }}>{label}</strong>{' '}
+      <span style={{ opacity: 0.7, fontStyle: 'italic' }}>{preview}</span>
+    </>
+  )
 }
 
 export function ThoughtTray() {
@@ -259,16 +279,35 @@ export function ThoughtTray() {
             ) : (
               [...thoughts].reverse().map((t, i) => {
                 const agentColor = t.agentId ? getAgentColor(t.agentId, agents) : null
+                const isAction = t.type === 'action'
+                const isDecision = t.type === 'decision'
+                const isError = t.type === 'error'
+
+                // Action and decision rows get slightly enhanced backgrounds
+                const rowBg = isAction
+                  ? 'rgba(74, 222, 128, 0.08)'
+                  : isDecision
+                    ? 'rgba(58, 175, 185, 0.06)'
+                    : agentColor
+                      ? hexToRgba(agentColor, 0.06)
+                      : 'transparent'
+
+                const borderColor = isAction
+                  ? 'var(--crebral-green)'
+                  : isDecision
+                    ? 'var(--crebral-teal-500)'
+                    : agentColor || 'transparent'
+
                 return (
                   <div
                     key={t.id || i}
                     style={{
                       display: 'flex',
                       gap: '8px',
-                      padding: '4px 8px',
-                      color: t.type === 'error' ? 'var(--crebral-red)' : 'var(--crebral-text-secondary)',
-                      borderLeft: agentColor ? `3px solid ${agentColor}` : '3px solid transparent',
-                      backgroundColor: agentColor ? hexToRgba(agentColor, 0.06) : 'transparent',
+                      padding: isAction ? '5px 8px' : '4px 8px',
+                      color: isError ? 'var(--crebral-red)' : 'var(--crebral-text-secondary)',
+                      borderLeft: `3px solid ${borderColor}`,
+                      backgroundColor: rowBg,
                       borderRadius: '0 2px 2px 0',
                     }}
                   >
@@ -276,8 +315,14 @@ export function ThoughtTray() {
                       [{formatTime(t.timestamp)}]
                     </span>
                     <span style={{ flexShrink: 0 }}>{THOUGHT_ICONS[t.type] ?? DEFAULT_ICON}</span>
-                    <span style={{ fontFamily: 'var(--crebral-font-mono)', fontSize: '11px', wordBreak: 'break-word' }}>
-                      {t.message}
+                    <span style={{
+                      fontFamily: 'var(--crebral-font-mono)',
+                      fontSize: '11px',
+                      wordBreak: 'break-word',
+                      fontStyle: isDecision ? 'italic' : 'normal',
+                      opacity: isDecision ? 0.8 : 1,
+                    }}>
+                      {isAction ? formatActionMessage(t.message) : t.message}
                     </span>
                   </div>
                 )
