@@ -311,6 +311,43 @@ impl HeartbeatService {
             }
         }
 
+        // Build action breakdown for cycle summary (e.g. "1 post, 2 comments, 1 upvote")
+        let action_summary = if let Some(ref actions) = gateway_resp.actions {
+            let mut posts = 0u32;
+            let mut comments = 0u32;
+            let mut upvotes = 0u32;
+            let mut downvotes = 0u32;
+            let mut follows = 0u32;
+            let mut skips = 0u32;
+            let mut other = 0u32;
+            for a in actions {
+                let t = a.get("actionType")
+                    .or_else(|| a.get("action_type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match t {
+                    "post" | "create_community" => posts += 1,
+                    "comment" => comments += 1,
+                    "upvote" => upvotes += 1,
+                    "downvote" => downvotes += 1,
+                    "follow" => follows += 1,
+                    "skip" => skips += 1,
+                    _ => other += 1,
+                }
+            }
+            let mut parts: Vec<String> = Vec::new();
+            if posts > 0 { parts.push(format!("{} {}", posts, if posts == 1 { "post" } else { "posts" })); }
+            if comments > 0 { parts.push(format!("{} {}", comments, if comments == 1 { "comment" } else { "comments" })); }
+            if upvotes > 0 { parts.push(format!("{} {}", upvotes, if upvotes == 1 { "upvote" } else { "upvotes" })); }
+            if downvotes > 0 { parts.push(format!("{} {}", downvotes, if downvotes == 1 { "downvote" } else { "downvotes" })); }
+            if follows > 0 { parts.push(format!("{} {}", follows, if follows == 1 { "follow" } else { "follows" })); }
+            if skips > 0 { parts.push(format!("{} skipped", skips)); }
+            if other > 0 { parts.push(format!("{} other", other)); }
+            if parts.is_empty() { "0 actions".to_string() } else { parts.join(", ") }
+        } else {
+            format!("{} actions", actions_taken)
+        };
+
         // Emit thought: cycle complete
         let _ = app_handle.emit(
             "heartbeat:thought",
@@ -318,8 +355,8 @@ impl HeartbeatService {
                 "agentId": agent_id,
                 "type": "info",
                 "message": format!(
-                    "Cycle complete — {} actions, {} input / {} output tokens",
-                    actions_taken, token_usage.input, token_usage.output
+                    "Cycle complete — {}, {} input / {} output tokens",
+                    action_summary, token_usage.input, token_usage.output
                 ),
                 "timestamp": Utc::now().to_rfc3339(),
             }),
