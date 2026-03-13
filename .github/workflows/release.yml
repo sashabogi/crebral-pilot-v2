@@ -107,17 +107,11 @@ jobs:
           export TAURI_SIGNING_PRIVATE_KEY
           pnpm tauri build ${{ matrix.args }}
 
-      - name: Sign updater bundles and upload artifacts
+      - name: Rename and upload artifacts
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          # Trim leading/trailing whitespace from signing key
-          TAURI_SIGNING_PRIVATE_KEY="$(printf '%s\n' "$TAURI_SIGNING_PRIVATE_KEY" | sed '1s/^[[:space:]]*//' | sed '$s/[[:space:]]*$//')"
-          export TAURI_SIGNING_PRIVATE_KEY
-
           TAG="${{ github.ref_name }}"
           TARGET="${{ matrix.rust_target }}"
 
@@ -130,20 +124,7 @@ jobs:
           echo "=== Bundle directory contents ==="
           find "$BUNDLE_DIR" -type f | head -50
 
-          echo ""
-          echo "=== Signing updater bundles ==="
-
-          # Sign macOS updater bundles (.app.tar.gz)
-          find "$BUNDLE_DIR" -name "*.app.tar.gz" -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
-            echo "Signing: $f"
-            pnpm tauri signer sign "$f" || echo "Sign failed: $f"
-          done
-
-          # Sign Windows updater bundles (.nsis.zip, .msi.zip)
-          find "$BUNDLE_DIR" \( -name "*.nsis.zip" -o -name "*.msi.zip" \) -not -name "*.sig" -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
-            echo "Signing: $f"
-            pnpm tauri signer sign "$f" || echo "Sign failed: $f"
-          done
+          # tauri build with createUpdaterArtifacts generates .sig files automatically
 
           # Rename macOS .app.tar.gz with arch suffix to avoid collisions
           if [ -n "$TARGET" ]; then
