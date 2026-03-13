@@ -210,107 +210,105 @@ jobs:
           mkdir -p /tmp/sigs
 
           python3 <<'PYEOF'
-import json, subprocess, os, sys
+          import json, subprocess, os, sys
 
-tag = os.environ["TAG"]
-version = os.environ["VERSION"]
-repo = os.environ["REPO"]
-pub_date = os.environ["PUB_DATE"]
-base_url = os.environ["BASE_URL"]
+          tag = os.environ["TAG"]
+          version = os.environ["VERSION"]
+          repo = os.environ["REPO"]
+          pub_date = os.environ["PUB_DATE"]
+          base_url = os.environ["BASE_URL"]
 
-assets = [a.strip() for a in os.environ.get("ASSET_LIST", "").strip().split("\n") if a.strip()]
-print(f"Found {len(assets)} release assets")
+          assets = [a.strip() for a in os.environ.get("ASSET_LIST", "").strip().split("\n") if a.strip()]
+          print(f"Found {len(assets)} release assets")
 
-def find_asset(suffix):
-    for a in assets:
-        if a.endswith(suffix):
-            return a
-    return None
+          def find_asset(suffix):
+              for a in assets:
+                  if a.endswith(suffix):
+                      return a
+              return None
 
-def read_sig(sig_name):
-    if not sig_name or sig_name not in assets:
-        # Try from downloaded workflow artifacts
-        for root, dirs, files in os.walk("/tmp/all-sigs"):
-            for f in files:
-                if f == sig_name:
-                    path = os.path.join(root, f)
-                    return open(path).read().strip()
-        return None
-    subprocess.run(
-        ["gh", "release", "download", tag, "--repo", repo,
-         "--pattern", sig_name, "--dir", "/tmp/sigs", "--clobber"],
-        capture_output=True
-    )
-    path = f"/tmp/sigs/{sig_name}"
-    if os.path.isfile(path):
-        return open(path).read().strip()
-    return None
+          def read_sig(sig_name):
+              if not sig_name or sig_name not in assets:
+                  for root, dirs, files in os.walk("/tmp/all-sigs"):
+                      for f in files:
+                          if f == sig_name:
+                              path = os.path.join(root, f)
+                              return open(path).read().strip()
+                  return None
+              subprocess.run(
+                  ["gh", "release", "download", tag, "--repo", repo,
+                   "--pattern", sig_name, "--dir", "/tmp/sigs", "--clobber"],
+                  capture_output=True
+              )
+              path = f"/tmp/sigs/{sig_name}"
+              if os.path.isfile(path):
+                  return open(path).read().strip()
+              return None
 
-platforms = {}
+          platforms = {}
 
-# macOS aarch64
-mac_arm_bundle = find_asset("_aarch64.app.tar.gz")
-mac_arm_sig_name = find_asset("_aarch64.app.tar.gz.sig")
-mac_arm_sig = read_sig(mac_arm_sig_name)
-if mac_arm_bundle and mac_arm_sig:
-    platforms["darwin-aarch64"] = {
-        "signature": mac_arm_sig,
-        "url": f"{base_url}/{mac_arm_bundle}"
-    }
-    print("Added darwin-aarch64")
-else:
-    print(f"SKIP darwin-aarch64: bundle={mac_arm_bundle}, sig_name={mac_arm_sig_name}, sig={'found' if mac_arm_sig else 'MISSING'}")
+          # macOS aarch64
+          mac_arm_bundle = find_asset("_aarch64.app.tar.gz")
+          mac_arm_sig_name = find_asset("_aarch64.app.tar.gz.sig")
+          mac_arm_sig = read_sig(mac_arm_sig_name)
+          if mac_arm_bundle and mac_arm_sig:
+              platforms["darwin-aarch64"] = {
+                  "signature": mac_arm_sig,
+                  "url": f"{base_url}/{mac_arm_bundle}"
+              }
+              print("Added darwin-aarch64")
+          else:
+              print(f"SKIP darwin-aarch64: bundle={mac_arm_bundle}, sig_name={mac_arm_sig_name}, sig={'found' if mac_arm_sig else 'MISSING'}")
 
-# macOS x64
-mac_x64_bundle = find_asset("_x64.app.tar.gz")
-mac_x64_sig_name = find_asset("_x64.app.tar.gz.sig")
-mac_x64_sig = read_sig(mac_x64_sig_name)
-if mac_x64_bundle and mac_x64_sig:
-    platforms["darwin-x86_64"] = {
-        "signature": mac_x64_sig,
-        "url": f"{base_url}/{mac_x64_bundle}"
-    }
-    print("Added darwin-x86_64")
-else:
-    print(f"SKIP darwin-x86_64: bundle={mac_x64_bundle}, sig_name={mac_x64_sig_name}, sig={'found' if mac_x64_sig else 'MISSING'}")
+          # macOS x64
+          mac_x64_bundle = find_asset("_x64.app.tar.gz")
+          mac_x64_sig_name = find_asset("_x64.app.tar.gz.sig")
+          mac_x64_sig = read_sig(mac_x64_sig_name)
+          if mac_x64_bundle and mac_x64_sig:
+              platforms["darwin-x86_64"] = {
+                  "signature": mac_x64_sig,
+                  "url": f"{base_url}/{mac_x64_bundle}"
+              }
+              print("Added darwin-x86_64")
+          else:
+              print(f"SKIP darwin-x86_64: bundle={mac_x64_bundle}, sig_name={mac_x64_sig_name}, sig={'found' if mac_x64_sig else 'MISSING'}")
 
-# Windows x64 — prefer NSIS, fallback to MSI
-for suffix_zip, suffix_sig in [("nsis.zip", "nsis.zip.sig"), ("msi.zip", "msi.zip.sig")]:
-    if "windows-x86_64" in platforms:
-        break
-    win_bundle = find_asset(suffix_zip)
-    win_sig_name = find_asset(suffix_sig)
-    win_sig = read_sig(win_sig_name)
-    if win_bundle and win_sig:
-        platforms["windows-x86_64"] = {
-            "signature": win_sig,
-            "url": f"{base_url}/{win_bundle}"
-        }
-        fmt = suffix_zip.split(".")[0]
-        print(f"Added windows-x86_64 ({fmt})")
-    else:
-        print(f"SKIP windows-x86_64 ({suffix_zip}): bundle={win_bundle}, sig_name={win_sig_name}, sig={'found' if win_sig else 'MISSING'}")
+          # Windows x64 — prefer NSIS, fallback to MSI
+          for suffix_zip, suffix_sig in [("nsis.zip", "nsis.zip.sig"), ("msi.zip", "msi.zip.sig")]:
+              if "windows-x86_64" in platforms:
+                  break
+              win_bundle = find_asset(suffix_zip)
+              win_sig_name = find_asset(suffix_sig)
+              win_sig = read_sig(win_sig_name)
+              if win_bundle and win_sig:
+                  platforms["windows-x86_64"] = {
+                      "signature": win_sig,
+                      "url": f"{base_url}/{win_bundle}"
+                  }
+                  fmt = suffix_zip.split(".")[0]
+                  print(f"Added windows-x86_64 ({fmt})")
+              else:
+                  print(f"SKIP windows-x86_64 ({suffix_zip}): bundle={win_bundle}, sig_name={win_sig_name}, sig={'found' if win_sig else 'MISSING'}")
 
-latest = {
-    "version": version,
-    "notes": f"Crebral Pilot v{version}",
-    "pub_date": pub_date,
-    "platforms": platforms
-}
+          latest = {
+              "version": version,
+              "notes": f"Crebral Pilot v{version}",
+              "pub_date": pub_date,
+              "platforms": platforms
+          }
 
-with open("/tmp/latest.json", "w") as f:
-    json.dump(latest, f, indent=2)
+          with open("/tmp/latest.json", "w") as f:
+              json.dump(latest, f, indent=2)
 
-print("\n=== latest.json ===")
-print(json.dumps(latest, indent=2))
+          print("\n=== latest.json ===")
+          print(json.dumps(latest, indent=2))
 
-if not platforms:
-    print("\nERROR: No platforms found — .sig files may be missing from the release")
-    print("This means the Tauri updater will not work for this release.")
-    print("Users can still download installers manually from the release page.")
-    # Exit 0 so the release isn't marked as failed — installers are still valid
-    sys.exit(0)
-PYEOF
+          if not platforms:
+              print("\nERROR: No platforms found — .sig files may be missing from the release")
+              print("This means the Tauri updater will not work for this release.")
+              print("Users can still download installers manually from the release page.")
+              sys.exit(0)
+          PYEOF
 
           # Upload latest.json even if empty (so the URL doesn't 404)
           if [ -f /tmp/latest.json ]; then
