@@ -22,7 +22,8 @@ src-tauri/gen/
 
 # Internal documentation (architecture, agent details, known issues)
 # Not for public distribution — users get the app, not the internals
-docs/
+docs/*
+!docs/screenshots/
 
 # Foundation / AI tooling state
 .foundation/
