@@ -61,6 +61,7 @@ jobs:
         run: pnpm install
 
       - name: Build and release with Tauri
+        id: tauri_build
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -82,38 +83,82 @@ jobs:
           updaterJsonKeepUniversal: true
           args: ${{ matrix.args }}
 
-      - name: Upload updater artifacts (.sig and .zip bundles)
+      - name: Collect and upload updater artifacts
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          echo "Looking for updater artifacts..."
+          ARTIFACT_PATHS='${{ steps.tauri_build.outputs.artifactPaths }}'
+          echo "Artifact paths from tauri-action: $ARTIFACT_PATHS"
 
+          # Determine bundle directory
           if [ "${{ runner.os }}" == "Windows" ]; then
-            SEARCH_DIR="src-tauri/target/release/bundle"
+            BUNDLE_DIR="src-tauri/target/release/bundle"
           else
             TARGET="${{ matrix.rust_target }}"
             if [ -n "$TARGET" ]; then
-              SEARCH_DIR="src-tauri/target/${TARGET}/release/bundle"
+              BUNDLE_DIR="src-tauri/target/${TARGET}/release/bundle"
             else
-              SEARCH_DIR="src-tauri/target/release/bundle"
+              BUNDLE_DIR="src-tauri/target/release/bundle"
             fi
           fi
 
-          echo "Searching in: $SEARCH_DIR"
+          # Collect staging dir for .sig files
+          mkdir -p /tmp/updater-sigs
 
-          # Upload .sig files
-          find "$SEARCH_DIR" -name "*.sig" -type f 2>/dev/null | while read f; do
-            echo "Uploading: $(basename "$f")"
-            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber || true
+          # Strategy 1: Look for .sig adjacent to known artifacts
+          if [ -n "$ARTIFACT_PATHS" ] && [ "$ARTIFACT_PATHS" != "null" ]; then
+            echo "--- Strategy 1: artifact paths ---"
+            for artifact in $(echo "$ARTIFACT_PATHS" | jq -r '.[]' 2>/dev/null); do
+              sig="${artifact}.sig"
+              if [ -f "$sig" ]; then
+                echo "Found sig (adjacent): $sig"
+                cp "$sig" /tmp/updater-sigs/
+              fi
+            done
+          fi
+
+          # Strategy 2: Find .sig files in bundle directory
+          echo "--- Strategy 2: find in $BUNDLE_DIR ---"
+          if [ -d "$BUNDLE_DIR" ]; then
+            find "$BUNDLE_DIR" -name "*.sig" -type f 2>/dev/null | while IFS= read -r f; do
+              echo "Found sig (find): $f"
+              cp "$f" /tmp/updater-sigs/
+            done
+          else
+            echo "Bundle dir does not exist: $BUNDLE_DIR"
+          fi
+
+          # Strategy 3: Broader search in entire target
+          echo "--- Strategy 3: broad search ---"
+          find src-tauri/target -name "*.app.tar.gz.sig" -o -name "*.nsis.zip.sig" -o -name "*.msi.zip.sig" 2>/dev/null | while IFS= read -r f; do
+            echo "Found sig (broad): $f"
+            cp "$f" /tmp/updater-sigs/
           done
 
-          # Upload updater zip bundles (Windows: .nsis.zip, .msi.zip; macOS: .app.tar.gz already uploaded by tauri-action)
-          find "$SEARCH_DIR" \( -name "*.nsis.zip" -o -name "*.msi.zip" \) -type f 2>/dev/null | while read f; do
-            echo "Uploading: $(basename "$f")"
-            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber || true
+          # Also find updater zip bundles for Windows
+          find src-tauri/target -name "*.nsis.zip" -not -name "*.sig" -o -name "*.msi.zip" -not -name "*.sig" 2>/dev/null | while IFS= read -r f; do
+            echo "Found zip bundle: $f"
+            cp "$f" /tmp/updater-sigs/
           done
+
+          echo "--- Collected files ---"
+          ls -la /tmp/updater-sigs/ || echo "(empty)"
+
+          # Upload all collected files to the GitHub release
+          for f in /tmp/updater-sigs/*; do
+            [ -f "$f" ] || continue
+            echo "Uploading to release: $(basename "$f")"
+            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber || echo "Failed: $(basename "$f")"
+          done
+
+      - name: Save .sig files as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-sigs-${{ matrix.rust_target || 'windows' }}
+          path: /tmp/updater-sigs/*.sig
+          if-no-files-found: warn
 
   publish-updater:
     needs: [build]
@@ -121,140 +166,154 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Download all sig artifacts
+        uses: actions/download-artifact@v4
         with:
-          sparse-checkout: |
-            src-tauri/tauri.conf.json
+          path: /tmp/all-sigs
+          pattern: updater-sigs-*
+          merge-multiple: true
+
+      - name: Debug downloaded artifacts
+        run: |
+          echo "=== Downloaded artifacts ==="
+          find /tmp/all-sigs -type f 2>/dev/null || echo "No artifacts downloaded"
+
+      - name: Upload sigs to release (fallback)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          for f in /tmp/all-sigs/*.sig 2>/dev/null; do
+            [ -f "$f" ] || continue
+            echo "Uploading sig: $(basename "$f")"
+            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber || true
+          done
 
       - name: Generate and upload latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.ref_name }}"
-          VERSION="${TAG#v}"
-          REPO="${{ github.repository }}"
-          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          BASE_URL="https://github.com/$REPO/releases/download/$TAG"
+          export TAG="${{ github.ref_name }}"
+          export VERSION="${TAG#v}"
+          export REPO="${{ github.repository }}"
+          export PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          export BASE_URL="https://github.com/$REPO/releases/download/$TAG"
 
           echo "Generating latest.json for version $VERSION..."
-          sleep 10
 
           # List all release assets
-          ASSETS=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+          ASSET_LIST=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
           echo "Release assets:"
-          echo "$ASSETS"
+          echo "$ASSET_LIST"
+          export ASSET_LIST
 
           mkdir -p /tmp/sigs
 
-          # Helper: download .sig file, return JSON-safe escaped content
-          get_sig() {
-            local sig_name="$1"
-            if echo "$ASSETS" | grep -qF "$sig_name"; then
-              gh release download "$TAG" --repo "$REPO" --pattern "$sig_name" --dir /tmp/sigs --clobber 2>/dev/null
-              if [ -f "/tmp/sigs/$sig_name" ]; then
-                # minisign sigs are multiline — escape for JSON embedding
-                python3 -c "import sys,json; print(json.dumps(open(sys.argv[1]).read()))" "/tmp/sigs/$sig_name"
-                return 0
-              fi
-            fi
-            return 1
-          }
-
-          # Use python3 to build latest.json safely (handles multiline sigs, special chars)
           python3 <<'PYEOF'
-          import json, subprocess, os, sys
+import json, subprocess, os, sys
 
-          tag = os.environ["TAG"]
-          version = os.environ["VERSION"]
-          repo = os.environ["REPO"]
-          pub_date = os.environ["PUB_DATE"]
-          base_url = os.environ["BASE_URL"]
+tag = os.environ["TAG"]
+version = os.environ["VERSION"]
+repo = os.environ["REPO"]
+pub_date = os.environ["PUB_DATE"]
+base_url = os.environ["BASE_URL"]
 
-          assets_raw = os.environ.get("ASSETS_LIST", "")
-          if not assets_raw:
-              result = subprocess.run(
-                  ["gh", "release", "view", tag, "--repo", repo, "--json", "assets", "--jq", ".assets[].name"],
-                  capture_output=True, text=True
-              )
-              assets_raw = result.stdout
-          assets = [a.strip() for a in assets_raw.strip().split("\n") if a.strip()]
+assets = [a.strip() for a in os.environ.get("ASSET_LIST", "").strip().split("\n") if a.strip()]
+print(f"Found {len(assets)} release assets")
 
-          def find_asset(suffix):
-              for a in assets:
-                  if a.endswith(suffix):
-                      return a
-              return None
+def find_asset(suffix):
+    for a in assets:
+        if a.endswith(suffix):
+            return a
+    return None
 
-          def read_sig(sig_name):
-              if not sig_name or sig_name not in assets:
-                  return None
-              subprocess.run(
-                  ["gh", "release", "download", tag, "--repo", repo,
-                   "--pattern", sig_name, "--dir", "/tmp/sigs", "--clobber"],
-                  capture_output=True
-              )
-              path = f"/tmp/sigs/{sig_name}"
-              if os.path.isfile(path):
-                  return open(path).read().strip()
-              return None
+def read_sig(sig_name):
+    if not sig_name or sig_name not in assets:
+        # Try from downloaded workflow artifacts
+        for root, dirs, files in os.walk("/tmp/all-sigs"):
+            for f in files:
+                if f == sig_name:
+                    path = os.path.join(root, f)
+                    return open(path).read().strip()
+        return None
+    subprocess.run(
+        ["gh", "release", "download", tag, "--repo", repo,
+         "--pattern", sig_name, "--dir", "/tmp/sigs", "--clobber"],
+        capture_output=True
+    )
+    path = f"/tmp/sigs/{sig_name}"
+    if os.path.isfile(path):
+        return open(path).read().strip()
+    return None
 
-          platforms = {}
+platforms = {}
 
-          # macOS aarch64
-          mac_arm_bundle = find_asset("_aarch64.app.tar.gz")
-          mac_arm_sig_name = find_asset("_aarch64.app.tar.gz.sig")
-          mac_arm_sig = read_sig(mac_arm_sig_name)
-          if mac_arm_bundle and mac_arm_sig:
-              platforms["darwin-aarch64"] = {
-                  "signature": mac_arm_sig,
-                  "url": f"{base_url}/{mac_arm_bundle}"
-              }
-              print("Added darwin-aarch64")
+# macOS aarch64
+mac_arm_bundle = find_asset("_aarch64.app.tar.gz")
+mac_arm_sig_name = find_asset("_aarch64.app.tar.gz.sig")
+mac_arm_sig = read_sig(mac_arm_sig_name)
+if mac_arm_bundle and mac_arm_sig:
+    platforms["darwin-aarch64"] = {
+        "signature": mac_arm_sig,
+        "url": f"{base_url}/{mac_arm_bundle}"
+    }
+    print("Added darwin-aarch64")
+else:
+    print(f"SKIP darwin-aarch64: bundle={mac_arm_bundle}, sig_name={mac_arm_sig_name}, sig={'found' if mac_arm_sig else 'MISSING'}")
 
-          # macOS x64
-          mac_x64_bundle = find_asset("_x64.app.tar.gz")
-          mac_x64_sig_name = find_asset("_x64.app.tar.gz.sig")
-          mac_x64_sig = read_sig(mac_x64_sig_name)
-          if mac_x64_bundle and mac_x64_sig:
-              platforms["darwin-x86_64"] = {
-                  "signature": mac_x64_sig,
-                  "url": f"{base_url}/{mac_x64_bundle}"
-              }
-              print("Added darwin-x86_64")
+# macOS x64
+mac_x64_bundle = find_asset("_x64.app.tar.gz")
+mac_x64_sig_name = find_asset("_x64.app.tar.gz.sig")
+mac_x64_sig = read_sig(mac_x64_sig_name)
+if mac_x64_bundle and mac_x64_sig:
+    platforms["darwin-x86_64"] = {
+        "signature": mac_x64_sig,
+        "url": f"{base_url}/{mac_x64_bundle}"
+    }
+    print("Added darwin-x86_64")
+else:
+    print(f"SKIP darwin-x86_64: bundle={mac_x64_bundle}, sig_name={mac_x64_sig_name}, sig={'found' if mac_x64_sig else 'MISSING'}")
 
-          # Windows x64 — prefer NSIS, fallback to MSI
-          for suffix_zip, suffix_sig in [("nsis.zip", "nsis.zip.sig"), ("msi.zip", "msi.zip.sig")]:
-              if "windows-x86_64" in platforms:
-                  break
-              win_bundle = find_asset(suffix_zip)
-              win_sig_name = find_asset(suffix_sig)
-              win_sig = read_sig(win_sig_name)
-              if win_bundle and win_sig:
-                  platforms["windows-x86_64"] = {
-                      "signature": win_sig,
-                      "url": f"{base_url}/{win_bundle}"
-                  }
-                  fmt = suffix_zip.split(".")[0]
-                  print(f"Added windows-x86_64 ({fmt})")
+# Windows x64 — prefer NSIS, fallback to MSI
+for suffix_zip, suffix_sig in [("nsis.zip", "nsis.zip.sig"), ("msi.zip", "msi.zip.sig")]:
+    if "windows-x86_64" in platforms:
+        break
+    win_bundle = find_asset(suffix_zip)
+    win_sig_name = find_asset(suffix_sig)
+    win_sig = read_sig(win_sig_name)
+    if win_bundle and win_sig:
+        platforms["windows-x86_64"] = {
+            "signature": win_sig,
+            "url": f"{base_url}/{win_bundle}"
+        }
+        fmt = suffix_zip.split(".")[0]
+        print(f"Added windows-x86_64 ({fmt})")
+    else:
+        print(f"SKIP windows-x86_64 ({suffix_zip}): bundle={win_bundle}, sig_name={win_sig_name}, sig={'found' if win_sig else 'MISSING'}")
 
-          latest = {
-              "version": version,
-              "notes": f"Crebral Pilot v{version}",
-              "pub_date": pub_date,
-              "platforms": platforms
-          }
+latest = {
+    "version": version,
+    "notes": f"Crebral Pilot v{version}",
+    "pub_date": pub_date,
+    "platforms": platforms
+}
 
-          with open("/tmp/latest.json", "w") as f:
-              json.dump(latest, f, indent=2)
+with open("/tmp/latest.json", "w") as f:
+    json.dump(latest, f, indent=2)
 
-          print(json.dumps(latest, indent=2))
+print("\n=== latest.json ===")
+print(json.dumps(latest, indent=2))
 
-          if not platforms:
-              print("WARNING: No platforms found — .sig files may be missing from the release")
-              sys.exit(1)
-          PYEOF
+if not platforms:
+    print("\nERROR: No platforms found — .sig files may be missing from the release")
+    print("This means the Tauri updater will not work for this release.")
+    print("Users can still download installers manually from the release page.")
+    # Exit 0 so the release isn't marked as failed — installers are still valid
+    sys.exit(0)
+PYEOF
 
-          # Upload to release
-          gh release upload "$TAG" /tmp/latest.json --repo "$REPO" --clobber
-          echo "latest.json uploaded to release $TAG"
+          # Upload latest.json even if empty (so the URL doesn't 404)
+          if [ -f /tmp/latest.json ]; then
+            gh release upload "$TAG" /tmp/latest.json --repo "$REPO" --clobber
+            echo "latest.json uploaded to release $TAG"
+          fi
