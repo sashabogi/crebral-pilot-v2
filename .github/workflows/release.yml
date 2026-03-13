@@ -6,7 +6,23 @@ on:
       - 'v*'
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "Crebral Pilot ${{ github.ref_name }}" \
+            --notes "See the assets below to download and install Crebral Pilot ${{ github.ref_name }}." \
+            --latest
+
   build:
+    needs: [create-release]
     strategy:
       fail-fast: false
       matrix:
@@ -60,105 +76,65 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
-      - name: Build and release with Tauri
-        id: tauri_build
-        uses: tauri-apps/tauri-action@v0
+      - name: Import Apple certificate (macOS)
+        if: runner.os == 'macOS'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERT_PATH=$RUNNER_TEMP/build_certificate.p12
+          KC_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERT_PATH
+          security create-keychain -p "actions" $KC_PATH
+          security set-keychain-settings -lut 21600 $KC_PATH
+          security unlock-keychain -p "actions" $KC_PATH
+          security import $CERT_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KC_PATH
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" $KC_PATH
+          security list-keychain -d user -s $KC_PATH
+
+      - name: Build Tauri app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Crebral Pilot ${{ github.ref_name }}'
-          releaseBody: |
-            See the assets below to download and install Crebral Pilot ${{ github.ref_name }}.
-          releaseDraft: false
-          prerelease: false
-          updaterJsonKeepUniversal: true
-          args: ${{ matrix.args }}
+        run: pnpm tauri build ${{ matrix.args }}
 
-      - name: Collect and upload updater artifacts
+      - name: Upload artifacts to release
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          ARTIFACT_PATHS='${{ steps.tauri_build.outputs.artifactPaths }}'
-          echo "Artifact paths from tauri-action: $ARTIFACT_PATHS"
 
-          # Determine bundle directory
           if [ "${{ runner.os }}" == "Windows" ]; then
             BUNDLE_DIR="src-tauri/target/release/bundle"
           else
-            TARGET="${{ matrix.rust_target }}"
-            if [ -n "$TARGET" ]; then
-              BUNDLE_DIR="src-tauri/target/${TARGET}/release/bundle"
-            else
-              BUNDLE_DIR="src-tauri/target/release/bundle"
-            fi
+            BUNDLE_DIR="src-tauri/target/${{ matrix.rust_target }}/release/bundle"
           fi
 
-          # Collect staging dir for .sig files
-          mkdir -p /tmp/updater-sigs
+          echo "=== Bundle directory contents ==="
+          find "$BUNDLE_DIR" -type f | head -50
 
-          # Strategy 1: Look for .sig adjacent to known artifacts
-          if [ -n "$ARTIFACT_PATHS" ] && [ "$ARTIFACT_PATHS" != "null" ]; then
-            echo "--- Strategy 1: artifact paths ---"
-            for artifact in $(echo "$ARTIFACT_PATHS" | jq -r '.[]' 2>/dev/null); do
-              sig="${artifact}.sig"
-              if [ -f "$sig" ]; then
-                echo "Found sig (adjacent): $sig"
-                cp "$sig" /tmp/updater-sigs/
-              fi
-            done
-          fi
+          echo ""
+          echo "=== Uploading release artifacts ==="
 
-          # Strategy 2: Find .sig files in bundle directory
-          echo "--- Strategy 2: find in $BUNDLE_DIR ---"
-          if [ -d "$BUNDLE_DIR" ]; then
-            find "$BUNDLE_DIR" -name "*.sig" -type f 2>/dev/null | while IFS= read -r f; do
-              echo "Found sig (find): $f"
-              cp "$f" /tmp/updater-sigs/
-            done
-          else
-            echo "Bundle dir does not exist: $BUNDLE_DIR"
-          fi
-
-          # Strategy 3: Broader search in entire target
-          echo "--- Strategy 3: broad search ---"
-          find src-tauri/target -name "*.app.tar.gz.sig" -o -name "*.nsis.zip.sig" -o -name "*.msi.zip.sig" 2>/dev/null | while IFS= read -r f; do
-            echo "Found sig (broad): $f"
-            cp "$f" /tmp/updater-sigs/
+          find "$BUNDLE_DIR" -type f \( \
+            -name "*.dmg" -o \
+            -name "*.app.tar.gz" -o \
+            -name "*.app.tar.gz.sig" -o \
+            -name "*.exe" -o \
+            -name "*.msi" -o \
+            -name "*.nsis.zip" -o \
+            -name "*.nsis.zip.sig" -o \
+            -name "*.msi.zip" -o \
+            -name "*.msi.zip.sig" \
+          \) | while IFS= read -r f; do
+            echo "Uploading: $(basename "$f")"
+            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber || echo "FAILED: $(basename "$f")"
           done
-
-          # Also find updater zip bundles for Windows
-          find src-tauri/target -name "*.nsis.zip" -not -name "*.sig" -o -name "*.msi.zip" -not -name "*.sig" 2>/dev/null | while IFS= read -r f; do
-            echo "Found zip bundle: $f"
-            cp "$f" /tmp/updater-sigs/
-          done
-
-          echo "--- Collected files ---"
-          ls -la /tmp/updater-sigs/ || echo "(empty)"
-
-          # Upload all collected files to the GitHub release
-          for f in /tmp/updater-sigs/*; do
-            [ -f "$f" ] || continue
-            echo "Uploading to release: $(basename "$f")"
-            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber || echo "Failed: $(basename "$f")"
-          done
-
-      - name: Save .sig files as workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: updater-sigs-${{ matrix.rust_target || 'windows' }}
-          path: /tmp/updater-sigs/*.sig
-          if-no-files-found: warn
 
   publish-updater:
     needs: [build]
@@ -166,29 +142,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download all sig artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/all-sigs
-          pattern: updater-sigs-*
-          merge-multiple: true
-
-      - name: Debug downloaded artifacts
-        run: |
-          echo "=== Downloaded artifacts ==="
-          find /tmp/all-sigs -type f 2>/dev/null || echo "No artifacts downloaded"
-
-      - name: Upload sigs to release (fallback)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.ref_name }}"
-          for f in /tmp/all-sigs/*.sig 2>/dev/null; do
-            [ -f "$f" ] || continue
-            echo "Uploading sig: $(basename "$f")"
-            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber || true
-          done
-
       - name: Generate and upload latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -201,11 +154,9 @@ jobs:
 
           echo "Generating latest.json for version $VERSION..."
 
-          # List all release assets
-          ASSET_LIST=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+          export ASSET_LIST=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
           echo "Release assets:"
           echo "$ASSET_LIST"
-          export ASSET_LIST
 
           mkdir -p /tmp/sigs
 
@@ -220,6 +171,8 @@ jobs:
 
           assets = [a.strip() for a in os.environ.get("ASSET_LIST", "").strip().split("\n") if a.strip()]
           print(f"Found {len(assets)} release assets")
+          for a in assets:
+              print(f"  - {a}")
 
           def find_asset(suffix):
               for a in assets:
@@ -229,11 +182,6 @@ jobs:
 
           def read_sig(sig_name):
               if not sig_name or sig_name not in assets:
-                  for root, dirs, files in os.walk("/tmp/all-sigs"):
-                      for f in files:
-                          if f == sig_name:
-                              path = os.path.join(root, f)
-                              return open(path).read().strip()
                   return None
               subprocess.run(
                   ["gh", "release", "download", tag, "--repo", repo,
@@ -258,7 +206,7 @@ jobs:
               }
               print("Added darwin-aarch64")
           else:
-              print(f"SKIP darwin-aarch64: bundle={mac_arm_bundle}, sig_name={mac_arm_sig_name}, sig={'found' if mac_arm_sig else 'MISSING'}")
+              print(f"SKIP darwin-aarch64: bundle={mac_arm_bundle}, sig={mac_arm_sig_name}")
 
           # macOS x64
           mac_x64_bundle = find_asset("_x64.app.tar.gz")
@@ -271,7 +219,7 @@ jobs:
               }
               print("Added darwin-x86_64")
           else:
-              print(f"SKIP darwin-x86_64: bundle={mac_x64_bundle}, sig_name={mac_x64_sig_name}, sig={'found' if mac_x64_sig else 'MISSING'}")
+              print(f"SKIP darwin-x86_64: bundle={mac_x64_bundle}, sig={mac_x64_sig_name}")
 
           # Windows x64 — prefer NSIS, fallback to MSI
           for suffix_zip, suffix_sig in [("nsis.zip", "nsis.zip.sig"), ("msi.zip", "msi.zip.sig")]:
@@ -288,7 +236,7 @@ jobs:
                   fmt = suffix_zip.split(".")[0]
                   print(f"Added windows-x86_64 ({fmt})")
               else:
-                  print(f"SKIP windows-x86_64 ({suffix_zip}): bundle={win_bundle}, sig_name={win_sig_name}, sig={'found' if win_sig else 'MISSING'}")
+                  print(f"SKIP windows-x86_64 ({suffix_zip}): bundle={win_bundle}, sig={win_sig_name}")
 
           latest = {
               "version": version,
@@ -304,13 +252,10 @@ jobs:
           print(json.dumps(latest, indent=2))
 
           if not platforms:
-              print("\nERROR: No platforms found — .sig files may be missing from the release")
-              print("This means the Tauri updater will not work for this release.")
-              print("Users can still download installers manually from the release page.")
-              sys.exit(0)
+              print("\nWARNING: No platforms with signatures found")
+              print("Installers are still available for manual download")
           PYEOF
 
-          # Upload latest.json even if empty (so the URL doesn't 404)
           if [ -f /tmp/latest.json ]; then
             gh release upload "$TAG" /tmp/latest.json --repo "$REPO" --clobber
             echo "latest.json uploaded to release $TAG"
