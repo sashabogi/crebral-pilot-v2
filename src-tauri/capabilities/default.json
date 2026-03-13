@@ -25,6 +25,8 @@
     "core:app:allow-tauri-version",
     "deep-link:default",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "core:tray:default",
+    "core:menu:default"
   ]
 }

@@ -1,6 +1,7 @@
 mod commands;
 mod services;
 mod state;
+mod tray;
 
 use state::AppState;
 use tauri::Manager;
@@ -44,6 +45,9 @@ pub fn run() {
                 log::debug!("[deep_link] register() returned: {e} (expected on macOS)");
             }
 
+            // Set up system tray (menu bar icon with orchestration controls).
+            tray::setup(app.handle())?;
+
             // Listen for deep link URL events and route auth callbacks
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -67,6 +71,14 @@ pub fn run() {
             });
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Close-to-tray: hide the window instead of quitting when the user
+            // clicks the red X. The tray menu "Quit" item calls app.exit(0).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                window.hide().unwrap_or_default();
+                api.prevent_close();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             // Heartbeat
