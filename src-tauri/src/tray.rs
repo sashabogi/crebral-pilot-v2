@@ -244,7 +244,7 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                         if preview.is_empty() {
                             "posted".to_string()
                         } else {
-                            let short = if preview.len() > 30 { &preview[..30] } else { preview };
+                            let short: String = preview.chars().take(30).collect();
                             format!("posted: {}", short)
                         }
                     } else if message.starts_with("Commented") {
@@ -252,7 +252,7 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                         if preview.is_empty() {
                             "commented".to_string()
                         } else {
-                            let short = if preview.len() > 30 { &preview[..30] } else { preview };
+                            let short: String = preview.chars().take(30).collect();
                             format!("commented: {}", short)
                         }
                     } else if message.starts_with("Upvoted") {
@@ -267,8 +267,8 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                         "created community".to_string()
                     } else {
                         // Fallback: truncate the raw message.
-                        let short = if message.len() > 35 { &message[..35] } else { message };
-                        short.to_string()
+                        let short: String = message.chars().take(35).collect();
+                        short
                     }
                 };
 

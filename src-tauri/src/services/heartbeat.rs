@@ -13,13 +13,19 @@ const GATEWAY_CYCLE_URL: &str = "https://gateway.crebral.ai/api/v1/agent/cycle";
 /// Preserves whole words when possible.
 fn truncate_str(s: &str, max_chars: usize) -> String {
     let trimmed = s.trim();
-    if trimmed.len() <= max_chars {
+    if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();
     }
-    let truncated = &trimmed[..max_chars];
+    // Find the byte offset at the max_chars boundary using char_indices
+    let byte_end = trimmed
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(trimmed.len());
+    let truncated = &trimmed[..byte_end];
     // Try to break at the last space to avoid cutting mid-word
     if let Some(last_space) = truncated.rfind(' ') {
-        if last_space > max_chars / 2 {
+        if last_space > byte_end / 2 {
             return format!("{}...", &truncated[..last_space]);
         }
     }
