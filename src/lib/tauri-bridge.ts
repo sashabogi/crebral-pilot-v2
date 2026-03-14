@@ -10,6 +10,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getVersion } from '@tauri-apps/api/app'
 import { open as shellOpen } from '@tauri-apps/plugin-shell'
 
 // ---------------------------------------------------------------------------
@@ -314,8 +315,11 @@ export const api = {
     return 'darwin'
   })(),
 
-  appVersion: '2.0.0',
+  appVersion: '...',
 }
+
+// Populate appVersion from Tauri config at module load
+getVersion().then((v) => { api.appVersion = v }).catch(() => {})
 
 // ---------------------------------------------------------------------------
 // Type aliases — match the global declarations from the Electron env.d.ts
