@@ -7,6 +7,8 @@ use tauri::Emitter;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use super::fleet::{AgentStatusPayload, FleetService, ThoughtBroadcastPayload};
+
 const GATEWAY_CYCLE_URL: &str = "https://gateway.crebral.ai/api/v1/agent/cycle";
 
 /// Truncate a string to `max_chars` characters, appending "..." if truncated.
@@ -138,14 +140,29 @@ impl HeartbeatService {
     }
 
     /// Run a single heartbeat cycle for an agent. Returns the result.
+    /// When `fleet_service` is provided, thoughts are also broadcast to connected devices.
     pub async fn run_cycle(
         http: &reqwest::Client,
         agent_id: &str,
         api_key: &str,
         config: &HeartbeatConfig,
         app_handle: &tauri::AppHandle,
+        fleet_service: Option<&FleetService>,
     ) -> Result<HeartbeatResult, String> {
         let start = std::time::Instant::now();
+        let cycle_id = uuid::Uuid::new_v4().to_string();
+
+        // Helper closure: broadcast a thought to fleet if fleet_service is available
+        let broadcast = |kind: &str, content: &str, fleet: Option<&FleetService>| {
+            if let Some(fs) = fleet {
+                fs.broadcast_thought(ThoughtBroadcastPayload {
+                    agent_name: agent_id.to_string(),
+                    kind: kind.to_string(),
+                    content: content.to_string(),
+                    cycle_id: Some(cycle_id.clone()),
+                });
+            }
+        };
 
         // Emit thought: starting cycle
         let model_info = match (&config.provider, &config.model) {
@@ -153,15 +170,17 @@ impl HeartbeatService {
             (Some(p), None) => format!(" [{}]", p),
             _ => String::new(),
         };
+        let start_msg = format!("Starting heartbeat cycle...{}", model_info);
         let _ = app_handle.emit(
             "heartbeat:thought",
             serde_json::json!({
                 "agentId": agent_id,
                 "type": "info",
-                "message": format!("Starting heartbeat cycle...{}", model_info),
+                "message": &start_msg,
                 "timestamp": Utc::now().to_rfc3339(),
             }),
         );
+        broadcast("info", &start_msg, fleet_service);
 
         // Normalize provider name to what the gateway expects
         let gateway_provider = config.provider.as_deref().map(|p| {
@@ -198,6 +217,7 @@ impl HeartbeatService {
                 "timestamp": Utc::now().to_rfc3339(),
             }),
         );
+        broadcast("info", "Calling Gateway cycle API...", fleet_service);
 
         let resp = match http
             .post(GATEWAY_CYCLE_URL)
@@ -218,6 +238,7 @@ impl HeartbeatService {
                         "timestamp": Utc::now().to_rfc3339(),
                     }),
                 );
+                broadcast("error", &msg, fleet_service);
                 return Err(msg);
             }
         };
@@ -239,6 +260,7 @@ impl HeartbeatService {
                     "timestamp": Utc::now().to_rfc3339(),
                 }),
             );
+            broadcast("error", &msg, fleet_service);
             return Err(msg);
         }
 
@@ -256,6 +278,7 @@ impl HeartbeatService {
                         "timestamp": Utc::now().to_rfc3339(),
                     }),
                 );
+                broadcast("error", &msg, fleet_service);
                 return Err(msg);
             }
         };
@@ -273,6 +296,7 @@ impl HeartbeatService {
                         "timestamp": Utc::now().to_rfc3339(),
                     }),
                 );
+                broadcast("error", &msg, fleet_service);
                 return Err(msg);
             }
         };
@@ -368,19 +392,22 @@ impl HeartbeatService {
                         "timestamp": Utc::now().to_rfc3339(),
                     }),
                 );
+                broadcast("action", &action_message, fleet_service);
 
                 // Emit reasoning as a separate "decision" thought if present
                 if !reasoning.is_empty() && action_type != "skip" {
                     let reasoning_preview = truncate_str(reasoning, 100);
+                    let reasoning_msg = format!("Reasoning: {}", reasoning_preview);
                     let _ = app_handle.emit(
                         "heartbeat:thought",
                         serde_json::json!({
                             "agentId": agent_id,
                             "type": "decision",
-                            "message": format!("Reasoning: {}", reasoning_preview),
+                            "message": &reasoning_msg,
                             "timestamp": Utc::now().to_rfc3339(),
                         }),
                     );
+                    broadcast("decision", &reasoning_msg, fleet_service);
                 }
             }
         }
@@ -424,18 +451,20 @@ impl HeartbeatService {
         };
 
         // Emit thought: cycle complete
+        let complete_msg = format!(
+            "Cycle complete — {}, {} input / {} output tokens",
+            action_summary, token_usage.input, token_usage.output
+        );
         let _ = app_handle.emit(
             "heartbeat:thought",
             serde_json::json!({
                 "agentId": agent_id,
                 "type": "info",
-                "message": format!(
-                    "Cycle complete — {}, {} input / {} output tokens",
-                    action_summary, token_usage.input, token_usage.output
-                ),
+                "message": &complete_msg,
                 "timestamp": Utc::now().to_rfc3339(),
             }),
         );
+        broadcast("info", &complete_msg, fleet_service);
 
         let result = HeartbeatResult {
             agent_id: agent_id.to_string(),
@@ -460,6 +489,7 @@ impl HeartbeatService {
         agent_id: String,
         api_key: String,
         config: HeartbeatConfig,
+        fleet_service: Arc<FleetService>,
         app_handle: tauri::AppHandle,
     ) -> Result<(), String> {
         let mut handles = self.handles.lock().await;
@@ -487,6 +517,7 @@ impl HeartbeatService {
         let http = self.http.clone();
         let interval_hours = config.interval_hours.unwrap_or(1.0);
         let interval_ms = (interval_hours * 3_600_000.0) as u64;
+        let fleet = fleet_service;
 
         // Emit initial status
         {
@@ -494,19 +525,58 @@ impl HeartbeatService {
             let _ = app_handle.emit("heartbeat:status-updated", s.clone());
         }
 
+        // Report agent as "running" / "waiting" to fleet on start
+        fleet.report_status(vec![AgentStatusPayload {
+            agent_name: agent_id.clone(),
+            status: "running".to_string(),
+            provider: config.provider.clone(),
+            model: config.model.clone(),
+            heartbeat_interval_hours: config.interval_hours,
+            last_heartbeat: None,
+            next_heartbeat: None,
+            current_activity: Some("waiting".to_string()),
+            last_action: None,
+            total_heartbeats: Some(0),
+            total_actions: None,
+            config: None,
+        }]);
+
+        let config_for_fleet = config.clone();
+
         tokio::spawn(async move {
             loop {
-                // Run one cycle
-                let result =
-                    Self::run_cycle(&http, &agent_id, &api_key, &config, &app_handle).await;
+                // Report agent as "thinking" to fleet before cycle
+                fleet.report_status(vec![AgentStatusPayload {
+                    agent_name: agent_id.clone(),
+                    status: "running".to_string(),
+                    provider: config_for_fleet.provider.clone(),
+                    model: config_for_fleet.model.clone(),
+                    heartbeat_interval_hours: config_for_fleet.interval_hours,
+                    last_heartbeat: None,
+                    next_heartbeat: None,
+                    current_activity: Some("thinking".to_string()),
+                    last_action: None,
+                    total_heartbeats: None,
+                    total_actions: None,
+                    config: None,
+                }]);
 
-                {
+                // Run one cycle (standalone mode — no fleet broadcast for thoughts)
+                let result =
+                    Self::run_cycle(&http, &agent_id, &api_key, &config, &app_handle, None).await;
+
+                let (cycle_count, last_action, next_run_str) = {
                     let mut s = status.lock().await;
                     s.last_run = Some(Utc::now().to_rfc3339());
 
-                    match &result {
-                        Ok(_) => {
+                    let last_action = match &result {
+                        Ok(r) => {
                             s.cycle_count += 1;
+                            if r.actions_taken > 0 {
+                                Some(format!("{} actions", r.actions_taken))
+                            } else {
+                                Some("cycle_complete".to_string())
+                            }
                         }
                         Err(e) => {
                             log::error!("Heartbeat cycle failed for {}: {}", agent_id, e);
@@ -519,15 +589,35 @@ impl HeartbeatService {
                                     "timestamp": Utc::now().to_rfc3339(),
                                 }),
                             );
+                            Some(format!("error: {}", &e[..e.len().min(100)]))
                         }
-                    }
+                    };
 
                     let next: DateTime<Utc> = Utc::now()
                         + chrono::Duration::milliseconds(interval_ms as i64);
-                    s.next_run = Some(next.to_rfc3339());
+                    let next_str = next.to_rfc3339();
+                    s.next_run = Some(next_str.clone());
 
                     let _ = app_handle.emit("heartbeat:status-updated", s.clone());
-                }
+
+                    (s.cycle_count, last_action, next_str)
+                };
+
+                // Report cycle-complete status to fleet
+                fleet.report_status(vec![AgentStatusPayload {
+                    agent_name: agent_id.clone(),
+                    status: "running".to_string(),
+                    provider: config_for_fleet.provider.clone(),
+                    model: config_for_fleet.model.clone(),
+                    heartbeat_interval_hours: config_for_fleet.interval_hours,
+                    last_heartbeat: Some(Utc::now().to_rfc3339()),
+                    next_heartbeat: Some(next_run_str),
+                    current_activity: Some("idle".to_string()),
+                    last_action,
+                    total_heartbeats: Some(cycle_count),
+                    total_actions: None,
+                    config: None,
+                }]);
 
                 // Wait for interval or cancellation
                 tokio::select! {
@@ -537,6 +627,23 @@ impl HeartbeatService {
                         s.running = false;
                         s.next_run = None;
                         let _ = app_handle.emit("heartbeat:status-updated", s.clone());
+
+                        // Report agent as "idle" to fleet on stop
+                        fleet.report_status(vec![AgentStatusPayload {
+                            agent_name: agent_id.clone(),
+                            status: "idle".to_string(),
+                            provider: config_for_fleet.provider.clone(),
+                            model: config_for_fleet.model.clone(),
+                            heartbeat_interval_hours: config_for_fleet.interval_hours,
+                            last_heartbeat: None,
+                            next_heartbeat: None,
+                            current_activity: Some("idle".to_string()),
+                            last_action: None,
+                            total_heartbeats: Some(s.cycle_count),
+                            total_actions: None,
+                            config: None,
+                        }]);
+
                         break;
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {

@@ -51,6 +51,28 @@ pub fn run() {
             // Set up error telemetry listener (fire-and-forget reporting).
             services::telemetry::setup(app.handle());
 
+            // Auto-register with fleet server (non-blocking, fire-and-forget).
+            // Runs after auth check — only registers if user is authenticated and has agents.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // Small delay to let auth state settle after app launch
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let state = handle.state::<AppState>();
+                    let fleet_service = std::sync::Arc::new(
+                        services::fleet::FleetService::from_shared(
+                            state.fleet_service.inner.clone(),
+                        ),
+                    );
+                    services::fleet::FleetService::auto_register(
+                        fleet_service,
+                        &state.store,
+                        handle.clone(),
+                    )
+                    .await;
+                });
+            }
+
             // Listen for deep link URL events and route auth callbacks
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {

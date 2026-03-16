@@ -162,9 +162,15 @@ pub async fn coordinator_start(
         crate::services::heartbeat::HeartbeatService::new(),
     );
 
+    // Share the fleet inner state from the app-level fleet service
+    // so that status reports use the registered fleet_id/device_token.
+    let fleet_service = Arc::new(crate::services::fleet::FleetService::from_shared(
+        state.fleet_service.inner.clone(),
+    ));
+
     state
         .coordinator_service
-        .start(heartbeat_service, app_handle)
+        .start(heartbeat_service, fleet_service, app_handle)
         .await?;
 
     let status = state.coordinator_service.status().await;
@@ -182,6 +188,30 @@ pub async fn coordinator_stop(
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     log::info!("coordinator_stop");
+
+    // Report all agents as idle before stopping
+    {
+        let coord_inner = state.coordinator_service.inner.lock().await;
+        let payloads: Vec<crate::services::fleet::AgentStatusPayload> = coord_inner
+            .queue
+            .iter()
+            .map(|agent| crate::services::fleet::AgentStatusPayload {
+                agent_name: agent.agent_id.clone(),
+                status: "idle".to_string(),
+                provider: agent.config.provider.clone(),
+                model: agent.config.model.clone(),
+                heartbeat_interval_hours: agent.config.interval_hours,
+                last_heartbeat: coord_inner.last_completed_times.get(&agent.agent_id).cloned(),
+                next_heartbeat: None,
+                current_activity: Some("idle".to_string()),
+                last_action: None,
+                total_heartbeats: coord_inner.agent_cycle_counts.get(&agent.agent_id).copied(),
+                total_actions: None,
+                config: None,
+            })
+            .collect();
+        state.fleet_service.report_status(payloads);
+    }
 
     state.coordinator_service.stop().await?;
 

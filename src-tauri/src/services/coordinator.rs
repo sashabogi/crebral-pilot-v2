@@ -7,6 +7,7 @@ use tauri::Emitter;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use super::fleet::{AgentStatusPayload, FleetService, OrchestrationStatePayload, get_hostname};
 use super::heartbeat::{HeartbeatConfig, HeartbeatService};
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -118,6 +119,141 @@ impl CoordinatorInner {
     fn next_active_agent_id(&self) -> Option<String> {
         self.next_active_agent().map(|(_, a)| a.agent_id)
     }
+
+    /// Build fleet status payloads for all agents in the queue.
+    /// Calculates REAL next_heartbeat per agent based on queue position relative to current_index,
+    /// not the naive `now + interval` which is wrong for orchestration mode.
+    fn build_agent_status_payloads(
+        &self,
+        override_status: Option<&str>,
+        override_activity: Option<&str>,
+        active_agent_id: Option<&str>,
+        active_activity: Option<&str>,
+    ) -> Vec<AgentStatusPayload> {
+        let total_agents = self.queue.len();
+        let gap_ms = self.min_gap_ms as i64;
+        // Base time: either the next_scheduled_at (if waiting between agents) or now
+        let base_time = self
+            .next_scheduled_at
+            .as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+
+        self.queue
+            .iter()
+            .enumerate()
+            .map(|(queue_pos, agent)| {
+                let is_active = active_agent_id.map_or(false, |id| id == agent.agent_id);
+                let is_paused = self.paused_agent_ids.contains(&agent.agent_id);
+
+                let status = if is_paused {
+                    "idle".to_string()
+                } else {
+                    override_status.unwrap_or("running").to_string()
+                };
+
+                let activity = if is_active {
+                    active_activity
+                        .unwrap_or("thinking")
+                        .to_string()
+                } else if is_paused {
+                    "paused".to_string()
+                } else {
+                    format!("queued ({} of {})", queue_pos + 1, total_agents)
+                };
+
+                let cycle_count = self
+                    .agent_cycle_counts
+                    .get(&agent.agent_id)
+                    .copied()
+                    .unwrap_or(0);
+
+                let last_completed = self
+                    .last_completed_times
+                    .get(&agent.agent_id)
+                    .cloned();
+
+                // Calculate real next_heartbeat based on queue distance from current_index.
+                // If agent is at or ahead of current_index, it runs in (distance * gap_ms).
+                // If agent is behind (already ran this round), it runs after a full cycle wraps.
+                let next_heartbeat = if is_active {
+                    // Currently running — no "next" time
+                    None
+                } else if is_paused {
+                    None
+                } else if total_agents > 0 {
+                    let distance = if queue_pos >= self.current_index {
+                        queue_pos - self.current_index
+                    } else {
+                        // Already passed in this round — full cycle + remaining
+                        total_agents - self.current_index + queue_pos
+                    };
+                    let next = base_time + chrono::Duration::milliseconds(gap_ms * distance as i64);
+                    Some(next.to_rfc3339())
+                } else {
+                    None
+                };
+
+                AgentStatusPayload {
+                    agent_name: agent.agent_id.clone(),
+                    status,
+                    provider: agent.config.provider.clone(),
+                    model: agent.config.model.clone(),
+                    heartbeat_interval_hours: agent.config.interval_hours,
+                    last_heartbeat: last_completed,
+                    next_heartbeat,
+                    current_activity: Some(activity),
+                    last_action: None,
+                    total_heartbeats: Some(cycle_count),
+                    total_actions: None,
+                    config: Some(serde_json::json!({
+                        "orchestration": true,
+                        "queue_position": queue_pos + 1,
+                        "total_agents": total_agents,
+                        "min_gap_ms": self.min_gap_ms,
+                        "mode": "orchestration"
+                    })),
+                }
+            })
+            .collect()
+    }
+
+    /// Build an OrchestrationStatePayload from the current coordinator state.
+    /// Used for fire-and-forget reporting to the fleet server on every transition.
+    ///
+    /// Note: `agent_id` in the coordinator IS the agent name (same value used
+    /// as `agent_name` in `AgentStatusPayload` throughout the codebase).
+    fn build_orch_state(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        device_platform: &str,
+        cycle_started_at: Option<String>,
+    ) -> OrchestrationStatePayload {
+        let queue_names: Vec<String> = self.queue.iter().map(|a| a.agent_id.clone()).collect();
+
+        let current_agent_name = self.current_agent_id.clone();
+
+        let next_agent_name = self.next_active_agent().map(|(_, a)| a.agent_id.clone());
+
+        OrchestrationStatePayload {
+            is_running: self.is_running,
+            current_agent_name,
+            next_agent_name,
+            next_scheduled_at: self.next_scheduled_at.clone(),
+            queue_order: queue_names,
+            paused_agents: self.paused_agent_ids.clone(),
+            min_gap_ms: self.min_gap_ms,
+            total_cycles: self.total_cycles,
+            agent_cycle_counts: self.agent_cycle_counts.clone(),
+            last_completed_times: self.last_completed_times.clone(),
+            orchestrating_device_id: device_id.to_string(),
+            orchestrating_device_name: device_name.to_string(),
+            orchestrating_platform: device_platform.to_string(),
+            cycle_started_at,
+        }
+    }
 }
 
 // ── Service ──────────────────────────────────────────────────────────────
@@ -146,6 +282,7 @@ impl CoordinatorService {
     pub async fn start(
         &self,
         _heartbeat_service: Arc<HeartbeatService>,
+        fleet_service: Arc<FleetService>,
         app_handle: tauri::AppHandle,
     ) -> Result<(), String> {
         let mut ct_guard = self.cancel_token.lock().await;
@@ -169,12 +306,32 @@ impl CoordinatorService {
 
         let inner = self.inner.clone();
         let http = reqwest::Client::new();
+        let fleet = fleet_service.clone();
 
-        // Emit initial status
+        // Resolve device identity once for orchestration state reporting
+        let device_id = FleetService::get_or_create_machine_id();
+        let device_name = get_hostname().unwrap_or_else(|| "unknown".to_string());
+        let device_platform = std::env::consts::OS.to_string();
+
+        // Emit initial status and report to fleet
         {
             let state = inner.lock().await;
             let _ = app_handle.emit("coordinator:status-updated", state.to_status());
+            // Report all agents as "running" / "waiting" on coordinator start
+            let payloads =
+                state.build_agent_status_payloads(Some("running"), Some("waiting"), None, None);
+            fleet.report_status(payloads);
+
+            // Report orchestration state: coordinator started
+            fleet.report_orchestration_state(
+                state.build_orch_state(&device_id, &device_name, &device_platform, None),
+            );
         }
+
+        // Clone device info for the spawned task
+        let dev_id = device_id.clone();
+        let dev_name = device_name.clone();
+        let dev_platform = device_platform.clone();
 
         tokio::spawn(async move {
             loop {
@@ -204,10 +361,16 @@ impl CoordinatorService {
                 };
 
                 // Update current agent
+                let cycle_started_at = Utc::now().to_rfc3339();
                 {
                     let mut state = inner.lock().await;
                     state.current_agent_id = Some(agent.agent_id.clone());
                     state.next_scheduled_at = None; // Currently running, no "next" yet
+
+                    // Report orchestration state: agent cycle begins
+                    fleet.report_orchestration_state(
+                        state.build_orch_state(&dev_id, &dev_name, &dev_platform, Some(cycle_started_at.clone())),
+                    );
                 }
 
                 // Emit agent-start event
@@ -220,15 +383,40 @@ impl CoordinatorService {
                     },
                 );
 
-                // Run one heartbeat cycle
+                // Report agent as "thinking" to fleet (fire-and-forget)
+                {
+                    let state = inner.lock().await;
+                    let payloads = state.build_agent_status_payloads(
+                        Some("running"),
+                        Some("waiting"),
+                        Some(&agent.agent_id),
+                        Some("thinking"),
+                    );
+                    fleet.report_status(payloads);
+                }
+
+                // Run one heartbeat cycle (with fleet broadcast for thoughts)
                 let cycle_result = HeartbeatService::run_cycle(
                     &http,
                     &agent.agent_id,
                     &agent.api_key,
                     &agent.config,
                     &app_handle,
+                    Some(&fleet),
                 )
                 .await;
+
+                // Determine last_action from cycle result
+                let last_action = match &cycle_result {
+                    Ok(r) => {
+                        if r.actions_taken > 0 {
+                            Some(format!("{} actions", r.actions_taken))
+                        } else {
+                            Some("cycle_complete".to_string())
+                        }
+                    }
+                    Err(e) => Some(format!("error: {}", &e[..e.len().min(100)])),
+                };
 
                 // Determine next agent for the event
                 let next_agent_id = {
@@ -288,6 +476,27 @@ impl CoordinatorService {
                     let next_at = Utc::now() + chrono::Duration::milliseconds(wait_ms as i64);
                     state.next_scheduled_at = Some(next_at.to_rfc3339());
                     let _ = app_handle.emit("coordinator:status-updated", state.to_status());
+
+                    // Report cycle-complete status to fleet with last_action and next_heartbeat
+                    let mut payloads = state.build_agent_status_payloads(
+                        Some("running"),
+                        Some("idle"),
+                        None,
+                        None,
+                    );
+                    // Patch the agent that just completed with its last_action
+                    for p in &mut payloads {
+                        if p.agent_name == agent.agent_id {
+                            p.last_action = last_action.clone();
+                            p.current_activity = Some("idle".to_string());
+                        }
+                    }
+                    fleet.report_status(payloads);
+
+                    // Report orchestration state: agent cycle complete
+                    fleet.report_orchestration_state(
+                        state.build_orch_state(&dev_id, &dev_name, &dev_platform, None),
+                    );
                 }
 
                 tokio::select! {
@@ -301,12 +510,23 @@ impl CoordinatorService {
                 }
             }
 
-            // Cleanup
+            // Cleanup — report all agents as idle on stop
             let mut state = inner.lock().await;
             state.is_running = false;
             state.current_agent_id = None;
             state.next_scheduled_at = None;
             let _ = app_handle.emit("coordinator:status-updated", state.to_status());
+
+            // Report all agents as "idle" to fleet
+            let payloads =
+                state.build_agent_status_payloads(Some("idle"), Some("idle"), None, None);
+            fleet.report_status(payloads);
+
+            // Report orchestration state: coordinator stopped
+            fleet.report_orchestration_state(
+                state.build_orch_state(&dev_id, &dev_name, &dev_platform, None),
+            );
+
             log::info!("Coordinator loop exited");
         });
 

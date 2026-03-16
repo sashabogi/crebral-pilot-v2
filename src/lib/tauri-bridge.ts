@@ -57,14 +57,23 @@ function tauriListen(
   if (!isTauri()) return () => {}
 
   let unlisten: UnlistenFn | null = null
+  let cancelled = false
 
   listen(eventName, (event) => {
-    callback(event, event.payload)
+    if (!cancelled) {
+      callback(event, event.payload)
+    }
   }).then((fn) => {
-    unlisten = fn
+    if (cancelled) {
+      // Cleanup was called before the listener was ready — unlisten immediately
+      fn()
+    } else {
+      unlisten = fn
+    }
   })
 
   return () => {
+    cancelled = true
     if (unlisten) unlisten()
   }
 }
@@ -221,8 +230,8 @@ export const api = {
   // ── Auth ──────────────────────────────────────────────────────────────────
 
   auth: {
-    login: () =>
-      safeInvoke('auth_login', {}, { ok: false }),
+    login: (provider: string = 'github') =>
+      safeInvoke('auth_login', { provider }, { ok: false }),
 
     syncAccount: (regenerateKeys?: boolean) =>
       safeInvoke('auth_sync_account', { regenerateKeys }, { ok: false }),

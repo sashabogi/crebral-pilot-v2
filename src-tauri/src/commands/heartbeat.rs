@@ -116,9 +116,14 @@ pub async fn heartbeat_start(
         }
     }
 
+    // Share the fleet inner state so heartbeat can report status
+    let fleet_service = std::sync::Arc::new(
+        crate::services::fleet::FleetService::from_shared(state.fleet_service.inner.clone()),
+    );
+
     state
         .heartbeat_service
-        .start(agent_id.clone(), resolved_key, hb_config, app_handle)
+        .start(agent_id.clone(), resolved_key, hb_config, fleet_service, app_handle)
         .await?;
 
     let status = state.heartbeat_service.status(&agent_id).await;
@@ -138,6 +143,24 @@ pub async fn heartbeat_stop(
     log::info!("heartbeat_stop: agent={}", agent_id);
 
     state.heartbeat_service.stop(&agent_id).await?;
+
+    // Report agent as idle to fleet (fire-and-forget)
+    state.fleet_service.report_status(vec![
+        crate::services::fleet::AgentStatusPayload {
+            agent_name: agent_id.clone(),
+            status: "idle".to_string(),
+            provider: None,
+            model: None,
+            heartbeat_interval_hours: None,
+            last_heartbeat: None,
+            next_heartbeat: None,
+            current_activity: Some("idle".to_string()),
+            last_action: None,
+            total_heartbeats: None,
+            total_actions: None,
+            config: None,
+        },
+    ]);
 
     Ok(serde_json::json!({
         "ok": true,

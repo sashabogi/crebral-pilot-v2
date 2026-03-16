@@ -552,9 +552,12 @@ async fn start_coordinator_from_tray(
     state.coordinator_service.set_queue(queue).await;
 
     let heartbeat_service = Arc::new(crate::services::heartbeat::HeartbeatService::new());
+    let fleet_service = Arc::new(crate::services::fleet::FleetService::from_shared(
+        state.fleet_service.inner.clone(),
+    ));
     state
         .coordinator_service
-        .start(heartbeat_service, app.clone())
+        .start(heartbeat_service, fleet_service, app.clone())
         .await
 }
 

@@ -83,16 +83,17 @@ fn get_active_token(state: &AppState) -> Result<(String, String), serde_json::Va
 /// Open the crebral.ai OAuth page in the default browser.
 /// The deep link handler (registered in lib.rs) will receive the callback.
 #[tauri::command]
-pub async fn auth_login(app: AppHandle) -> Result<serde_json::Value, String> {
-    let url = "https://www.crebral.ai/auth/electron";
+pub async fn auth_login(provider: Option<String>, app: AppHandle) -> Result<serde_json::Value, String> {
+    let provider = provider.unwrap_or_else(|| "github".to_string());
+    let url = format!("https://www.crebral.ai/auth/electron?provider={}", provider);
 
     // Use the opener plugin to open the URL in the default browser
     app.opener()
-        .open_url(url, None::<&str>)
+        .open_url(&url, None::<&str>)
         .map_err(|e| format!("Failed to open browser: {e}"))?;
 
-    log::info!("[auth_login] Opened browser for OAuth");
-    Ok(ok_response(json!({ "opened": true })))
+    log::info!("[auth_login] Opened browser for OAuth (provider: {})", provider);
+    Ok(ok_response(json!({ "opened": true, "provider": provider })))
 }
 
 /// Sync the active account from the server (user profile + agent list).
