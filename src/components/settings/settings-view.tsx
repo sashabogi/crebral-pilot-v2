@@ -40,7 +40,8 @@ interface UserInfo {
   qualificationStatus: string;
 }
 
-type AuthPhase = 'idle' | 'checking' | 'waiting-for-github' | 'syncing' | 'error';
+type AuthProvider = 'github' | 'google' | 'apple';
+type AuthPhase = 'idle' | 'checking' | 'waiting-for-provider' | 'syncing' | 'error';
 
 interface AuthState {
   isAuthenticated: boolean;
@@ -81,6 +82,7 @@ export function SettingsView() {
   // ── Account / Auth state ──────────────────────────────────────────
   const [auth, setAuth] = useState<AuthState>({ isAuthenticated: false, user: null });
   const [authPhase, setAuthPhase] = useState<AuthPhase>('checking');
+  const [activeProvider, setActiveProvider] = useState<AuthProvider>('github');
   const [authError, setAuthError] = useState<string | null>(null);
 
   // Multi-account store
@@ -106,9 +108,9 @@ export function SettingsView() {
     checkAuth();
   }, []);
 
-  // Listen for token arrival when waiting for GitHub
+  // Listen for token arrival when waiting for provider
   useEffect(() => {
-    if (authPhase !== 'waiting-for-github') return;
+    if (authPhase !== 'waiting-for-provider') return;
 
     const unsubscribe = api.auth.onTokenReceived((_event, data) => {
       const payload = data as { success: boolean; error?: string };
@@ -116,21 +118,24 @@ export function SettingsView() {
         handlePostConnect();
       } else {
         setAuthPhase('error');
-        setAuthError(payload.error || 'GitHub authorization failed');
+        setAuthError(payload.error || 'Authorization failed');
       }
     });
 
     return unsubscribe;
   }, [authPhase]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleConnect = async () => {
-    setAuthPhase('waiting-for-github');
+  const providerLabel = (p: AuthProvider) => p === 'github' ? 'GitHub' : p === 'google' ? 'Google' : 'Apple';
+
+  const handleConnect = async (provider: AuthProvider = 'github') => {
+    setActiveProvider(provider);
+    setAuthPhase('waiting-for-provider');
     setAuthError(null);
     try {
-      await api.auth.login();
+      await api.auth.login(provider);
     } catch {
       setAuthPhase('error');
-      setAuthError('Failed to open GitHub authorization page');
+      setAuthError(`Failed to open ${providerLabel(provider)} authorization page`);
     }
   };
 
@@ -410,39 +415,86 @@ export function SettingsView() {
                 );
               })}
 
-              {/* Add Account button */}
-              <button
-                onClick={handleConnect}
-                disabled={authPhase === 'waiting-for-github' || authPhase === 'syncing'}
-                className="flex items-center gap-2 w-full px-3 py-2.5 text-sm rounded-lg transition-all mt-3"
-                style={{
-                  background: 'transparent',
-                  border: '1px dashed var(--crebral-border-subtle)',
-                  color: 'var(--crebral-text-tertiary)',
-                  fontFamily: 'var(--crebral-font-body)',
-                  fontWeight: 500,
-                  cursor: authPhase === 'waiting-for-github' || authPhase === 'syncing' ? 'wait' : 'pointer',
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLElement).style.borderColor = 'var(--crebral-teal-700)';
-                  (e.currentTarget as HTMLElement).style.color = 'var(--crebral-teal-400)';
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLElement).style.borderColor = 'var(--crebral-border-subtle)';
-                  (e.currentTarget as HTMLElement).style.color = 'var(--crebral-text-tertiary)';
-                }}
-              >
-                {authPhase === 'waiting-for-github' || authPhase === 'syncing' ? (
-                  <Loader2 size={14} className="animate-spin" />
-                ) : (
-                  <Plus size={14} />
-                )}
-                {authPhase === 'waiting-for-github'
-                  ? 'Waiting for GitHub...'
-                  : authPhase === 'syncing'
-                    ? 'Syncing account...'
-                    : 'Add Account'}
-              </button>
+              {/* Add Account */}
+              {authPhase === 'waiting-for-provider' || authPhase === 'syncing' ? (
+                <div className="flex items-center gap-3 px-3 py-2.5 mt-3 rounded-lg" style={{ border: '1px dashed var(--crebral-border-subtle)' }}>
+                  <Loader2 size={14} className="animate-spin" style={{ color: 'var(--crebral-teal-500)' }} />
+                  <span className="text-sm" style={{ color: 'var(--crebral-text-tertiary)', fontFamily: 'var(--crebral-font-body)' }}>
+                    {authPhase === 'waiting-for-provider'
+                      ? `Waiting for ${providerLabel(activeProvider)}...`
+                      : 'Syncing account...'}
+                  </span>
+                </div>
+              ) : (
+                <div className="flex gap-2 mt-3">
+                  <button
+                    onClick={() => handleConnect('github')}
+                    className="flex items-center justify-center gap-1.5 flex-1 px-3 py-2 text-xs rounded-lg transition-all"
+                    style={{
+                      background: '#24292F',
+                      color: '#FFFFFF',
+                      border: 'none',
+                      fontFamily: 'var(--crebral-font-body)',
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.9' }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
+                    title="Add GitHub account"
+                  >
+                    <Plus size={12} />
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
+                    </svg>
+                    GitHub
+                  </button>
+                  <button
+                    onClick={() => handleConnect('google')}
+                    className="flex items-center justify-center gap-1.5 flex-1 px-3 py-2 text-xs rounded-lg transition-all"
+                    style={{
+                      background: '#FFFFFF',
+                      color: '#1F1F1F',
+                      border: '1px solid #DADCE0',
+                      fontFamily: 'var(--crebral-font-body)',
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.9' }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
+                    title="Add Google account"
+                  >
+                    <Plus size={12} />
+                    <svg width="14" height="14" viewBox="0 0 24 24">
+                      <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
+                      <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                      <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+                      <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+                    </svg>
+                    Google
+                  </button>
+                  <button
+                    onClick={() => handleConnect('apple')}
+                    className="flex items-center justify-center gap-1.5 flex-1 px-3 py-2 text-xs rounded-lg transition-all"
+                    style={{
+                      background: '#000000',
+                      color: '#FFFFFF',
+                      border: 'none',
+                      fontFamily: 'var(--crebral-font-body)',
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.9' }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
+                    title="Add Apple account"
+                  >
+                    <Plus size={12} />
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M17.05 20.28c-.98.95-2.05.88-3.08.4-1.09-.5-2.08-.48-3.24 0-1.44.62-2.2.44-3.06-.4C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z" />
+                    </svg>
+                    Apple
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -457,52 +509,91 @@ export function SettingsView() {
                   lineHeight: 1.5,
                 }}
               >
-                Connect your GitHub account to sync agents and get a device token.
+                Connect an account to sync agents and get a device token.
               </p>
 
-              <button
-                onClick={handleConnect}
-                disabled={authPhase === 'waiting-for-github' || authPhase === 'syncing'}
-                className="flex items-center gap-2 px-4 py-2 text-sm rounded-lg transition-all"
-                style={{
-                  background: 'var(--crebral-text-primary)',
-                  color: 'var(--crebral-bg-deep)',
-                  border: 'none',
-                  fontFamily: 'var(--crebral-font-body)',
-                  fontWeight: 600,
-                  cursor:
-                    authPhase === 'waiting-for-github' || authPhase === 'syncing'
-                      ? 'wait'
-                      : 'pointer',
-                  opacity:
-                    authPhase === 'waiting-for-github' || authPhase === 'syncing' ? 0.7 : 1,
-                }}
-              >
-                {authPhase === 'waiting-for-github' || authPhase === 'syncing' ? (
-                  <Loader2 size={14} className="animate-spin" />
-                ) : (
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
-                  </svg>
-                )}
-                {authPhase === 'waiting-for-github'
-                  ? 'Waiting for GitHub...'
-                  : authPhase === 'syncing'
-                    ? 'Syncing account...'
-                    : 'Connect with GitHub'}
-              </button>
+              {authPhase === 'waiting-for-provider' || authPhase === 'syncing' ? (
+                <div className="flex flex-col items-center gap-3 py-2">
+                  <Loader2 size={18} className="animate-spin" style={{ color: 'var(--crebral-teal-500)' }} />
+                  <p className="text-sm" style={{ color: 'var(--crebral-text-secondary)', fontFamily: 'var(--crebral-font-body)', margin: 0 }}>
+                    {authPhase === 'waiting-for-provider'
+                      ? `Waiting for ${providerLabel(activeProvider)}...`
+                      : 'Syncing account...'}
+                  </p>
+                  {authPhase === 'waiting-for-provider' && (
+                    <p className="text-xs" style={{ color: 'var(--crebral-text-muted)', fontFamily: 'var(--crebral-font-body)', margin: 0 }}>
+                      Complete sign-in in your browser, then return here.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {/* GitHub */}
+                  <button
+                    onClick={() => handleConnect('github')}
+                    className="flex items-center justify-center gap-2 w-full px-4 py-2.5 text-sm rounded-lg transition-all"
+                    style={{
+                      background: '#24292F',
+                      color: '#FFFFFF',
+                      border: 'none',
+                      fontFamily: 'var(--crebral-font-body)',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.9' }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
+                    </svg>
+                    Continue with GitHub
+                  </button>
 
-              {authPhase === 'waiting-for-github' && (
-                <p
-                  className="text-xs"
-                  style={{
-                    color: 'var(--crebral-text-muted)',
-                    fontFamily: 'var(--crebral-font-body)',
-                    margin: '4px 0 0 0',
-                  }}
-                >
-                  Complete sign-in in your browser, then return here.
-                </p>
+                  {/* Google */}
+                  <button
+                    onClick={() => handleConnect('google')}
+                    className="flex items-center justify-center gap-2 w-full px-4 py-2.5 text-sm rounded-lg transition-all"
+                    style={{
+                      background: '#FFFFFF',
+                      color: '#1F1F1F',
+                      border: '1px solid #DADCE0',
+                      fontFamily: 'var(--crebral-font-body)',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.9' }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24">
+                      <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
+                      <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                      <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+                      <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+                    </svg>
+                    Continue with Google
+                  </button>
+
+                  {/* Apple */}
+                  <button
+                    onClick={() => handleConnect('apple')}
+                    className="flex items-center justify-center gap-2 w-full px-4 py-2.5 text-sm rounded-lg transition-all"
+                    style={{
+                      background: '#000000',
+                      color: '#FFFFFF',
+                      border: 'none',
+                      fontFamily: 'var(--crebral-font-body)',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.9' }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M17.05 20.28c-.98.95-2.05.88-3.08.4-1.09-.5-2.08-.48-3.24 0-1.44.62-2.2.44-3.06-.4C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z" />
+                    </svg>
+                    Continue with Apple
+                  </button>
+                </div>
               )}
             </div>
           )}
