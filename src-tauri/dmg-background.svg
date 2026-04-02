@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <defs>
+    <!-- Teal glow filter for the arrow -->
+    <filter id="tealGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur"/>
+      <feColorMatrix in="blur" type="matrix"
+        values="0 0 0 0 0.078
+                0 0 0 0 0.722
+                0 0 0 0 0.651
+                0 0 0 0.6 0" result="glow"/>
+      <feMerge>
+        <feMergeNode in="glow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Subtle radial gradient for background depth -->
+    <radialGradient id="bgGradient" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#0F1528"/>
+      <stop offset="100%" stop-color="#0A0F1C"/>
+    </radialGradient>
+
+    <!-- Arrow gradient from teal to brighter teal -->
+    <linearGradient id="arrowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0D9488"/>
+      <stop offset="100%" stop-color="#14B8A6"/>
+    </linearGradient>
+
+    <!-- Subtle top highlight -->
+    <linearGradient id="topHighlight" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#14B8A6" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#14B8A6" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Dark navy background -->
+  <rect width="660" height="400" fill="url(#bgGradient)"/>
+
+  <!-- Subtle top highlight band -->
+  <rect width="660" height="120" fill="url(#topHighlight)"/>
+
+  <!-- Subtle grid dots pattern for texture -->
+  <g opacity="0.04">
+    <pattern id="dots" x="0" y="0" width="30" height="30" patternUnits="userSpaceOnUse">
+      <circle cx="15" cy="15" r="1" fill="#14B8A6"/>
+    </pattern>
+    <rect width="660" height="400" fill="url(#dots)"/>
+  </g>
+
+  <!-- "Drag to Applications" text -->
+  <text x="330" y="310" text-anchor="middle"
+    font-family="'SF Pro Display', 'Helvetica Neue', 'Segoe UI', sans-serif"
+    font-size="22" font-weight="500" fill="#FFFFFF" letter-spacing="0.5" opacity="0.95">
+    Drag to Applications
+  </text>
+
+  <!-- Subtle subtext -->
+  <text x="330" y="340" text-anchor="middle"
+    font-family="'SF Pro Display', 'Helvetica Neue', 'Segoe UI', sans-serif"
+    font-size="13" fill="#FFFFFF" opacity="0.35" letter-spacing="0.3">
+    Drop the app icon onto the Applications folder
+  </text>
+
+  <!-- Curved arrow from left (app icon area) to right (Applications folder area) -->
+  <g filter="url(#tealGlow)">
+    <!-- Main arrow path - gentle curve from left-center to right-center -->
+    <path d="M 220 175 C 270 130, 370 130, 420 175"
+      fill="none" stroke="url(#arrowGradient)" stroke-width="2.5"
+      stroke-linecap="round" stroke-dasharray="none" opacity="0.9"/>
+
+    <!-- Arrowhead pointing to the right/down -->
+    <polygon points="420,175 408,160 413,177"
+      fill="#14B8A6" opacity="0.9"/>
+  </g>
+
+  <!-- Thin horizontal line accent -->
+  <line x1="230" y1="280" x2="430" y2="280"
+    stroke="#14B8A6" stroke-width="0.5" opacity="0.15"/>
+
+  <!-- Bottom branding -->
+  <text x="330" y="380" text-anchor="middle"
+    font-family="'SF Pro Display', 'Helvetica Neue', 'Segoe UI', sans-serif"
+    font-size="10" fill="#14B8A6" opacity="0.3" letter-spacing="1.5" font-weight="500">
+    CREBRAL PILOT
+  </text>
+</svg>

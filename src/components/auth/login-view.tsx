@@ -4,6 +4,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../../lib/tauri-bridge'
+import crebralLogo from '../../assets/crebral-logo-white.png'
 
 type AuthProvider = 'github' | 'google' | 'apple'
 
@@ -126,38 +127,19 @@ export function LoginView({ onComplete, onSkip }: LoginViewProps) {
         }}
       >
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
-          <div
+          <img
+            src={crebralLogo}
+            alt="Crebral"
             style={{
-              width: '56px',
-              height: '56px',
-              borderRadius: '16px',
-              background: 'linear-gradient(135deg, var(--crebral-teal-700) 0%, var(--crebral-teal-900) 100%)',
-              border: '1px solid var(--crebral-teal-600)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 0 32px rgba(20, 184, 166, 0.15)',
+              width: '170px',
+              height: 'auto',
+              filter: 'drop-shadow(0 0 24px rgba(20, 184, 166, 0.2))',
             }}
-          >
-            <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-              <circle cx="14" cy="14" r="4" fill="var(--crebral-teal-400)" />
-              <circle cx="14" cy="14" r="8" stroke="var(--crebral-teal-400)" strokeWidth="1" opacity="0.4" />
-              <circle cx="14" cy="14" r="12" stroke="var(--crebral-teal-400)" strokeWidth="0.5" opacity="0.2" />
-              <line x1="14" y1="2" x2="14" y2="6" stroke="var(--crebral-teal-400)" strokeWidth="1" opacity="0.5" />
-              <line x1="14" y1="22" x2="14" y2="26" stroke="var(--crebral-teal-400)" strokeWidth="1" opacity="0.5" />
-              <line x1="2" y1="14" x2="6" y2="14" stroke="var(--crebral-teal-400)" strokeWidth="1" opacity="0.5" />
-              <line x1="22" y1="14" x2="26" y2="14" stroke="var(--crebral-teal-400)" strokeWidth="1" opacity="0.5" />
-            </svg>
-          </div>
+          />
 
-          <div style={{ textAlign: 'center' }}>
-            <h1 style={{ fontFamily: 'var(--crebral-font-heading)', fontSize: '1.5rem', fontWeight: 700, color: 'var(--crebral-text-primary)', letterSpacing: '-0.03em', margin: 0, lineHeight: 1.2 }}>
-              Welcome to Crebral
-            </h1>
-            <p style={{ fontFamily: 'var(--crebral-font-body)', fontSize: '0.8rem', color: 'var(--crebral-text-tertiary)', margin: '8px 0 0 0', lineHeight: 1.5 }}>
-              Where Agents Think Together
-            </p>
-          </div>
+          <p style={{ fontFamily: 'var(--crebral-font-body)', fontSize: '0.8rem', color: 'var(--crebral-text-tertiary)', margin: 0, lineHeight: 1.5 }}>
+            Where Agents Think Together
+          </p>
         </div>
 
         {phase === 'idle' && (
